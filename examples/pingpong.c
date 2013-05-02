@@ -26,12 +26,13 @@ ev_timer timeout_watcher;
 
 // We are going to connect to a single peer
 CBPeer *peer = 0;
-#define DEFAULT_IP      "127.0.0.1" // connect to local satoshi
-#define DEFAULT_PORT    18333
+#define DEFAULT_IP      "128.8.126.5" // connect to local satoshi
+#define DEFAULT_PORT    28333
 #define BUF_SIZE        4096
 
-//#define NETMAGIC 0xffffffff // mainnet
-#define NETMAGIC 0x0709110B // testnet
+#define NETMAGIC 0xffffffff // mainnet
+//#define NETMAGIC 0x0709110B // testnet
+#define NETMAGIC 0xd0b4bef9 // umdnet
 
 // Socket to hold our connection to satoshi client
 int sd;
@@ -56,7 +57,7 @@ static void print_hex(CBByteArray *str) {
 static void
 send_version() 
 {
-    CBByteArray *ip = CBNewByteArrayFromString("127.0.0.1", '\00');
+    CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
     CBByteArray *ua = CBNewByteArrayFromString("cmsc417versiona", '\00');
     CBNetworkAddress * sourceAddr = CBNewNetworkAddress(0, ip, 0, CB_SERVICE_FULL_BLOCKS, false);
     int32_t vers = 70001;
@@ -193,7 +194,7 @@ main (void)
     struct ev_loop *loop = ev_default_loop (0);
     printf("Type help for a list of commands\n");
 
-    CBByteArray *ip = CBNewByteArrayFromString(DEFAULT_IP, '\00');
+    CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
     CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
     peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 
@@ -205,7 +206,7 @@ main (void)
     memset(&addr, sizeof(addr), 0);
     addr.sin_family = AF_INET;
     addr.sin_port = htons(DEFAULT_PORT);
-    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_addr.s_addr = (((((25 << 8) | 126) << 8) | 8) << 8) | 128;
 
     // Connect to server socket
     if(connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0) {

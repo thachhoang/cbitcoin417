@@ -1,5 +1,12 @@
-Install openssl libraries:
+Install libraries:
 
 	sudo apt-get install libssl-dev
+	sudo apt-get install libev-dev
 
-Then follow the instructions in the cbitcoin README to get the examples running.
+Add this line to .bashrc (use absolute path to /bitcoin417/bin):
+
+	export LD_LIBRARY_PATH=~/Documents/project/bitcoin417/bin:$LD_LIBRARY_PATH
+
+Finally in /bitcoin417:
+
+	./configure; make clean; make examples-build
