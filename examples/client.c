@@ -19,7 +19,7 @@ void fprt(FILE *, const char *, ...);
 void help(){
 	prt("Commands: [cmd] [argument] ... \n");
 	prt(" help : shows this message\n");
-	prt(" quit : quits\n");
+	prt(" quit/q : quits\n");
 	prt(" version : sends version message client\n");
 	prt(" ping : sends ping message to connected client\n");
 	prt("\n");
@@ -40,7 +40,7 @@ int command(){
 		help();
 	} else if (!strcmp(cmd, "version")) {
 		prt("Sending version\n");
-	} else if (!strcmp(cmd, "quit")) {
+	} else if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) {
 		prt("Quitting...\n");
 		return 0;
 	} else if (!strcmp(cmd, "")) {
