@@ -21,7 +21,7 @@
 void fail(const char *, ...);	// exit in failure with custom message
 void sysfail(const char *);		// perror wrapper
 void prt(const char *, ...);	// printf wrapper
-void log(const char *, ...);	// printf only in debug mode
+void deb(const char *, ...);	// printf only in debug mode
 
 //#define NETMAGIC 0xffffffff // mainnet
 //#define NETMAGIC 0x0709110B // testnet
@@ -30,7 +30,8 @@ void log(const char *, ...);	// printf only in debug mode
 #define DEFAULT_IP		"128.8.126.5" // local satoshi: kale.cs.umd.edu
 #define DEFAULT_PORT	28333
 
-#define MAX_PENDING 5
+#define MAX_PENDING 5		// backlog size for listen()
+#define MAX_PEERS	10		// maximum number of connected peers
 
 typedef enum{
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
@@ -38,6 +39,8 @@ typedef enum{
 	CB_MESSAGE_HEADER_LENGTH = 16,		// The length of the message
 	CB_MESSAGE_HEADER_CHECKSUM = 20,	// The checksum of the message
 } CBMessageHeaderOffsets;
+
+int peers_count = 0;
 
 void help(){
 	prt("commands: [cmd] [argument] ... \n");
@@ -90,7 +93,7 @@ int listen_at(in_port_t port){
 	if (listen(sock, MAX_PENDING) < 0)
 		sysfail("listen()");
 	
-	log("Listening at port %d...\n", port);
+	prt("Listening at port %d\n", port);
 	return sock;
 }
 
@@ -108,8 +111,25 @@ int connect_first_peer(){
 	if (connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0)
 		sysfail("connect()");
 
-	log("Connected to first peer at %s:%d\n", DEFAULT_IP, DEFAULT_PORT);
+	prt("Connected to first peer at %s:%d\n", DEFAULT_IP, DEFAULT_PORT);
 	return sd;
+}
+
+void release_peer(void *peer){
+	// When the array is freed, free all peers in it and close their sockets
+	CBPeer *p = peer;
+	//deb("Closing socket %d\n", p->socketID);
+	close(p->socketID);
+	CBReleaseObject(p);
+}
+
+bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
+	if (NOT CBAssociativeArrayInsert(peers, peer, CBAssociativeArrayFind(peers, peer).position, NULL)){
+		deb("Could not insert a peer into the peers array.\n");
+		return false;
+	}
+	peers_count++;
+	return true;
 }
 
 int main(int argc, char *argv[]){
@@ -121,13 +141,17 @@ int main(int argc, char *argv[]){
 	int serv_sock = listen_at(DEFAULT_PORT);
 	
 	// Connect to initial peer
-	int init_sock = connect_first_peer();
 	CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
 	CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
 	CBPeer *init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
-	init_peer->socketID = init_sock;
+	init_peer->socketID = connect_first_peer();
 	
-	// ??? Add to list of peers
+	// Add initial peer to list of peers
+	CBAssociativeArray peers;
+	if (!CBInitAssociativeArray(&peers, CBKeyCompare, release_peer))
+		fail("Could not create associative array for peers.\n");
+	if (!add_peer(&peers, init_peer))
+		fail("Could not insert first peer.\n");
 	
 	fd_set rfds;
 	struct timeval tv;
@@ -138,6 +162,15 @@ int main(int argc, char *argv[]){
 		// Watch stdin for user input
 		FD_ZERO(&rfds);
 		FD_SET(STDIN_FILENO, &rfds);
+		
+		// Watch all peers
+		CBPosition it;
+		if (CBAssociativeArrayGetFirst(&peers, &it)) {
+			do {
+				CBPeer *peer = it.node->elements[it.index];
+				FD_SET(peer->socketID, &rfds);
+			} while (!CBAssociativeArrayIterate(&peers, &it));
+		}
 
 		// Wait up to five seconds
 		tv.tv_sec = 5;
@@ -158,10 +191,8 @@ int main(int argc, char *argv[]){
 		}
 	}
 	
-	// ??? free all peer objects in list and close associated sockets
-	// but for now...
-	close(init_sock);
-	CBFreeObject(init_peer);
+	// Free all peer objects and close associated sockets
+	CBFreeAssociativeArray(&peers);
 	
 	close(serv_sock);
 	return 0;
@@ -189,7 +220,7 @@ void prt(const char* fmt, ...){
 	va_end(args);
 }
 
-void log(const char* fmt, ...){
+void deb(const char* fmt, ...){
 	if(!DEBUG)
 		return;
 	va_list args;
