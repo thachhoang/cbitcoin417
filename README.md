@@ -22,14 +22,14 @@ Finally in /bitcoin417:
 ## Ideas
 
 Done:
-- Use select() in a loop to monitor everything
+  - Use select() in a loop to monitor everything
 
 Pending:
-- Accept incoming connections, create new sockets and save them in corresponding peer objects
-- Peer objects are collected in CBAssociativeArray
-- At the start, actively connect to initial peers (kale.cs.umd.edu)
-- Simple features like versioning will be function calls
-- Time-consuming stuff like mining should be in another thread to avoid blocking
+  - Accept incoming connections, create new sockets and save them in corresponding peer objects
+  - Peer objects are collected in CBAssociativeArray
+  - At the start, actively connect to initial peers (kale.cs.umd.edu)
+  - Simple features like versioning will be function calls
+  - Time-consuming stuff like mining should be in another thread to avoid blocking
 
 ## Notes
 
