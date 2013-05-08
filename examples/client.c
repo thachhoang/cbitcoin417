@@ -10,9 +10,11 @@
 #include <sys/types.h>
 #include <string.h>
 
+#include <CBAssociativeArray.h>
 #include <CBByteArray.h>
 #include <CBConstants.h>
-#include <CBAssociativeArray.h>
+#include <CBNetworkAddress.h>
+#include <CBPeer.h>
 
 #define DEBUG 1
 
@@ -72,7 +74,7 @@ int command(){
 	return 1; // rolling along
 }
 
-int init_sock(in_port_t port){
+int listen_at(in_port_t port){
 	int sock;
 	if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		sysfail("socket()");
@@ -83,7 +85,7 @@ int init_sock(in_port_t port){
 	addr.sin_addr.s_addr = htonl(INADDR_ANY); // any incoming interface?
 	addr.sin_port = htons(port);
 	
-	if (bind(sock, (struct sockaddr*) &addr, sizeof(addr)) < 0)
+	if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
 		sysfail("bind()");
 	if (listen(sock, MAX_PENDING) < 0)
 		sysfail("listen()");
@@ -92,13 +94,40 @@ int init_sock(in_port_t port){
 	return sock;
 }
 
+int connect_first_peer(){
+	int sd;
+	if((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+		sysfail("socket()");
+	
+	struct sockaddr_in addr;
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(DEFAULT_PORT);
+	addr.sin_addr.s_addr = (((((25 << 8) | 126) << 8) | 8) << 8) | 128; // DEFAULT_IP
+
+	if (connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0)
+		sysfail("connect()");
+
+	log("Connected to first peer at %s:%d\n", DEFAULT_IP, DEFAULT_PORT);
+	return sd;
+}
+
 int main(int argc, char *argv[]){
 	prt("CMSC417: Rudimentary bitcoin client.\n");
 	prt("Andrew Badger, Thach Hoang. 2013.\n");
 	help();
 	
 	// Create socket to detect incoming connections
-	int serv_sock = init_sock(DEFAULT_PORT);
+	int serv_sock = listen_at(DEFAULT_PORT);
+	
+	// Connect to initial peer
+	int init_sock = connect_first_peer();
+	CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
+	CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
+	CBPeer *init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
+	init_peer->socketID = init_sock;
+	
+	// ??? Add to list of peers
 	
 	fd_set rfds;
 	struct timeval tv;
@@ -128,6 +157,11 @@ int main(int argc, char *argv[]){
 			// Nothing really matters...
 		}
 	}
+	
+	// ??? free all peer objects in list and close associated sockets
+	// but for now...
+	close(init_sock);
+	CBFreeObject(init_peer);
 	
 	close(serv_sock);
 	return 0;
