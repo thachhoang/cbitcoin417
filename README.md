@@ -35,7 +35,7 @@ Pending:
 
 ## Notes
 
-# Variable length integer
+### Variable length integer
 
 [Source](https://bitcointalk.org/index.php?PHPSESSID=0j57qusrqmvof5lclsre0l4t02&topic=32849.msg410480#msg410480)
 

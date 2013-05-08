@@ -65,7 +65,7 @@ int command(){
 	} else if (!strcmp(cmd, "help")) {
 		help();
 	} else if (!strcmp(cmd, "version")) {
-		prt("sending version\n");
+		prt("sending version (not implemented)\n");
 	} else if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) {
 		prt("quitting...\n");
 		return 0; // party's over
@@ -118,7 +118,7 @@ int connect_first_peer(){
 void release_peer(void *peer){
 	// When the array is freed, free all peers in it and close their sockets
 	CBPeer *p = peer;
-	//deb("Closing socket %d\n", p->socketID);
+	deb("Closing socket %d\n", p->socketID);
 	close(p->socketID);
 	CBReleaseObject(p);
 }
@@ -130,6 +130,12 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 	}
 	peers_count++;
 	return true;
+}
+
+void send_version(CBPeer *peer){
+	deb("Prepare version msg for peer at sock %d\n", peer->socketID);
+	
+	peer->versionSent = true;
 }
 
 int main(int argc, char *argv[]){
@@ -145,6 +151,7 @@ int main(int argc, char *argv[]){
 	CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
 	CBPeer *init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 	init_peer->socketID = connect_first_peer();
+	init_peer->versionSent = false;
 	
 	// Add initial peer to list of peers
 	CBAssociativeArray peers;
@@ -157,6 +164,7 @@ int main(int argc, char *argv[]){
 	struct timeval tv;
 	int retval;
 	bool running = true;
+	CBPosition it;
 
 	while (running) {
 		// Watch stdin for user input
@@ -164,7 +172,6 @@ int main(int argc, char *argv[]){
 		FD_SET(STDIN_FILENO, &rfds);
 		
 		// Watch all peers
-		CBPosition it;
 		if (CBAssociativeArrayGetFirst(&peers, &it)) {
 			do {
 				CBPeer *peer = it.node->elements[it.index];
@@ -173,7 +180,7 @@ int main(int argc, char *argv[]){
 		}
 
 		// Wait up to five seconds
-		tv.tv_sec = 5;
+		tv.tv_sec = 0;
 		tv.tv_usec = 0;
 
 		retval = select(1, &rfds, NULL, NULL, &tv);
@@ -185,9 +192,26 @@ int main(int argc, char *argv[]){
 				if (!command())
 					running = false;
 			
-			// Handle peer connections...
+			// Handle incoming messages on peer connections
+			if (CBAssociativeArrayGetFirst(&peers, &it)) {
+				do {
+					CBPeer *peer = it.node->elements[it.index];
+					if (!FD_ISSET(peer->socketID, &rfds))
+						continue;
+					deb("Something at %d\n", peer->socketID);
+				} while (!CBAssociativeArrayIterate(&peers, &it));
+			}
 		} else {
 			// Nothing really matters...
+		}
+
+		// Outgoing messages to peers
+		if (CBAssociativeArrayGetFirst(&peers, &it)) {
+			do {
+				CBPeer *peer = it.node->elements[it.index];
+				if (!peer->versionSent)
+					send_version(peer);
+			} while (!CBAssociativeArrayIterate(&peers, &it));
 		}
 	}
 	
