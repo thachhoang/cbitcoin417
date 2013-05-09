@@ -169,8 +169,13 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 	return true;
 }
 
+void send_verack(CBPeer *peer){
+	// TODO
+	deb("Sending verack (TODO): %d\n", peer->socketID);
+}
+
 void send_version(CBPeer *peer){
-	//deb("Prepare version msg for peer at sock %d\n", peer->socketID);
+	deb("Sending version: %d\n", peer->socketID);
 	int sd = peer->socketID;
 	
     CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
@@ -211,9 +216,9 @@ void send_version(CBPeer *peer){
     }
     
     // Send the message
-    deb("message len: %d\n", message->bytes->length);
-    deb("checksum: %x\n", *((uint32_t *) message->checksum));
-    print_hex(message->bytes);
+    //deb("message len: %d\n", message->bytes->length);
+    //deb("checksum: %x\n", *((uint32_t *) message->checksum));
+    //print_hex(message->bytes);
 	rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
     if (rv < 0) {
     	perror("send()");
@@ -224,10 +229,8 @@ void send_version(CBPeer *peer){
 }
 
 bool read_message(int sd, CBPeer *peer){
-	// return false to close current socket and remove peer
-	
-	if (!peer)
-		return false; // should not happen
+	// Return false to close current socket and remove peer
+	bool new_peer = !peer;
 	
 	// Read the header
 	char header[24];
@@ -241,13 +244,13 @@ bool read_message(int sd, CBPeer *peer){
 		}
 	} else if (nread == 0) {
 		deb("empty header\n");
-		return true;
+		return !new_peer; // if new peer, close socket
 	}
 	
 	deb("<==\nreceived header\n");
 	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
 		printf("wrong netmagic\n");
-		return true;
+		return !new_peer; // if new peer, close socket
 	}
 	
 	// Read the payload
@@ -257,26 +260,44 @@ bool read_message(int sd, CBPeer *peer){
 	if (length) nread = recv(sd, payload, length, 0);
 	if (nread != length) {
 		deb("incomplete read %u %u \n", nread, length);
+		if (new_peer) return false;
 	} else {
 		deb("read payload of %u bytes\n", nread);
 	}
 	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
 		prt("received version header\n");
+		if (new_peer) {
+			deb("Correct version message: make conn(%d) a peer\n", sd);
+			// parse address and make this connection a peer
+		}
+		if (peer) {
+			if (!peer->versionSent)
+				send_version(peer);
+			send_verack(peer);
+		}
+	} else {
+		if (new_peer) {
+			deb("No version message from new peer: closing %d\n", sd);
+			return false; // no version message, no peer, close connection
+		}
 	}
+	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
 		prt("received verack header\n");
+		if (peer->versionSent)
+			peer->versionAck = true;
 	}
-	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
 		prt("received ping header\n");
 	}
-	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
 		prt("received pong header\n");
 	}
-	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		prt("received inv header\n");
 	}
-	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
 		prt("received addr header\n");
 	}
 	
@@ -306,6 +327,7 @@ int main(int argc, char *argv[]){
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
 		init_peer->versionSent = false;
+		init_peer->versionAck = false;
 		init_peer->getAddresses = false;
 		send_version(init_peer);
 		
@@ -391,11 +413,9 @@ int main(int argc, char *argv[]){
 					// If accept fails with EWOULDBLOCK, then all incoming connections
 					// have been accepted. Other failures will end the program.
 					
-					// TODO: when accepting connections, create a new peer object,
-					// assign to it proper network addr and socket, finally add socket
-					// to the watch list of poll(). Uncomment and finish the following block.
+					// Actual peer object will be created for this connection
+					// when the correct version message is received
 					
-					/*
 					new_sd = accept(listen_sd, NULL, NULL);
 					if (new_sd < 0) {
 						if (errno != EWOULDBLOCK) {
@@ -410,9 +430,6 @@ int main(int argc, char *argv[]){
 					nfds++;
 					
 					deb("New incoming connection: %d\n", new_sd);
-					*/
-					
-					deb("New incoming connection: not handled\n");
 				} while (new_sd != -1);
 			} else {
 				// Not listening socket. Check other connections.
@@ -430,10 +447,12 @@ int main(int argc, char *argv[]){
 				
 				bool success = read_message(fds[i].fd, peer);
 				if (!success) {
+					deb("Closing %d\n", fds[i].fd);
 					close(fds[i].fd);
 					fds[i].fd = -1;
 					compress_array = true;
-					CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
+					if (peer)
+						CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
 				}
 			}
 		} // descriptor loop
