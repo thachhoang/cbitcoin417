@@ -1,3 +1,5 @@
+Authors: Andrew Badger, Thach Hoang
+
 ## Setup
 
 Install libraries:
