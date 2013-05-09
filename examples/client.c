@@ -57,10 +57,10 @@ void help(){
 }
 
 static void print_hex(CBByteArray *str) {
-    int i = 0;
-    uint8_t *ptr = str->sharedData->data;
-    for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
-    deb("\n");
+	int i = 0;
+	uint8_t *ptr = str->sharedData->data;
+	for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
+	deb("\n");
 }
 
 int command(){
@@ -92,7 +92,6 @@ int command(){
 int listen_at(in_port_t port){
 	int sd, opt;
 	struct sockaddr_in addr;
-	
 	if ((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		sysfail("socket() failed");
 	
@@ -100,7 +99,6 @@ int listen_at(in_port_t port){
 		close(sd);
 		sysfail("setsockopt() failed");
 	}
-	
 	if ((fcntl(sd, F_SETFL, O_NONBLOCK) < 0)) {
 		close(sd);
 		sysfail("fcntl() failed");
@@ -115,7 +113,6 @@ int listen_at(in_port_t port){
 		close(sd);
 		sysfail("bind() failed");
 	}
-	
 	if (listen(sd, MAX_PENDING) < 0) {
 		close(sd);
 		sysfail("listen() failed");
@@ -248,6 +245,7 @@ int main(int argc, char *argv[]){
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
 		init_peer->versionSent = false;
+		send_version(init_peer);
 		
 		// Add initial peer to list of peers
 		if (!add_peer(&peers, init_peer))
@@ -287,15 +285,6 @@ int main(int argc, char *argv[]){
 	}
 	
 	while (running) {
-		// Outgoing messages to peers
-		if (CBAssociativeArrayGetFirst(&peers, &it)) {
-			do {
-				CBPeer *peer = it.node->elements[it.index];
-				if (!peer->versionSent)
-					send_version(peer);
-			} while (!CBAssociativeArrayIterate(&peers, &it));
-		}
-		
 		rv = poll(fds, nfds, timeout);
 		if (rv < 0) {
 			perror("poll()");
