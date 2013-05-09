@@ -163,6 +163,7 @@ int main(int argc, char *argv[]){
 	fd_set rfds;
 	struct timeval tv;
 	int retval;
+	int max_descriptor = serv_sock;
 	bool running = true;
 	CBPosition it;
 
@@ -171,11 +172,17 @@ int main(int argc, char *argv[]){
 		FD_ZERO(&rfds);
 		FD_SET(STDIN_FILENO, &rfds);
 		
+		// Watch default port for new peers
+		FD_SET(serv_sock, &rfds);
+		
 		// Watch all peers
 		if (CBAssociativeArrayGetFirst(&peers, &it)) {
 			do {
 				CBPeer *peer = it.node->elements[it.index];
-				FD_SET(peer->socketID, &rfds);
+				int sockID = peer->socketID;
+				FD_SET(sockID, &rfds);
+				if (sockID > max_descriptor)
+					max_descriptor = sockID;
 			} while (!CBAssociativeArrayIterate(&peers, &it));
 		}
 
@@ -183,7 +190,7 @@ int main(int argc, char *argv[]){
 		tv.tv_sec = 0;
 		tv.tv_usec = 0;
 
-		retval = select(1, &rfds, NULL, NULL, &tv);
+		retval = select(max_descriptor, &rfds, NULL, NULL, &tv);
 
 		if (retval == -1) {
 			perror("select()");
@@ -201,6 +208,8 @@ int main(int argc, char *argv[]){
 					deb("Something at %d\n", peer->socketID);
 				} while (!CBAssociativeArrayIterate(&peers, &it));
 			}
+			
+			
 		} else {
 			// Nothing really matters...
 		}
