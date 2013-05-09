@@ -36,7 +36,6 @@ void deb(const char *, ...);	// printf only in debug mode
 #define DEFAULT_PORT	28333
 
 #define MAX_PENDING 5		// backlog size for listen()
-#define MAX_PEERS	10		// maximum number of connected peers
 
 typedef enum{
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
@@ -44,8 +43,6 @@ typedef enum{
 	CB_MESSAGE_HEADER_LENGTH = 16,		// The length of the message
 	CB_MESSAGE_HEADER_CHECKSUM = 20,	// The checksum of the message
 } CBMessageHeaderOffsets;
-
-int peers_count = 0;
 
 void help(){
 	prt("commands: [cmd] [argument] ... \n");
@@ -64,6 +61,7 @@ static void print_hex(CBByteArray *str) {
 }
 
 int command(){
+	int rv = 1;
 	// Read a line
 	char *line = 0;
 	size_t len = 0;
@@ -80,17 +78,18 @@ int command(){
 		prt("sending version (not implemented)\n");
 	} else if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) {
 		prt("quitting...\n");
-		return 0; // party's over
+		rv = 0; // party's over
 	} else if (!strcmp(cmd, "")) {
 	} else {
 		prt("command not recognized: '%s'\n", cmd);
 	}
 	
-	return 1; // rolling along
+	free(line);
+	return rv; // rolling along
 }
 
 int listen_at(in_port_t port){
-	int sd, opt;
+	int sd, opt = 0;
 	struct sockaddr_in addr;
 	if ((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		sysfail("socket() failed");
@@ -165,7 +164,6 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 		deb("Could not insert a peer into the peers array.\n");
 		return false;
 	}
-	peers_count++;
 	return true;
 }
 
@@ -226,6 +224,10 @@ void send_version(CBPeer *peer){
     }
     
 	peer->versionSent = true;
+	CBFreeVersion(version);
+	CBFreeNetworkAddress(sourceAddr);
+	CBFreeByteArray(ip);
+	CBFreeByteArray(ua);
 }
 
 bool read_message(int sd, CBPeer *peer){
@@ -269,7 +271,7 @@ bool read_message(int sd, CBPeer *peer){
 		prt("received version header\n");
 		if (new_peer) {
 			deb("Correct version message: make conn(%d) a peer\n", sd);
-			// parse address and make this connection a peer
+			// TODO parse address and make this connection a peer
 		}
 		if (peer) {
 			if (!peer->versionSent)
@@ -302,6 +304,10 @@ bool read_message(int sd, CBPeer *peer){
 	}
 	
 	deb("==>\n");
+	
+    // Clean up
+    free(payload);
+    
 	return true;
 }
 
