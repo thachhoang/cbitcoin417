@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 
 #include <netinet/in.h>
@@ -15,8 +16,10 @@
 #include <CBAssociativeArray.h>
 #include <CBByteArray.h>
 #include <CBConstants.h>
+#include <CBMessage.h>
 #include <CBNetworkAddress.h>
 #include <CBPeer.h>
+#include <CBVersion.h>
 
 #define DEBUG 1
 
@@ -51,6 +54,13 @@ void help(){
 	prt("    version : sends version message client\n");
 	prt("    ping : sends ping message to connected client\n");
 	prt("\n");
+}
+
+static void print_hex(CBByteArray *str) {
+    int i = 0;
+    uint8_t *ptr = str->sharedData->data;
+    for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
+    deb("\n");
 }
 
 int command(){
@@ -91,6 +101,11 @@ int listen_at(in_port_t port){
 		sysfail("setsockopt() failed");
 	}
 	
+	if ((fcntl(sd, F_SETFL, O_NONBLOCK) < 0)) {
+		close(sd);
+		sysfail("fcntl() failed");
+	}
+	
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -115,18 +130,36 @@ int connect_first_peer(){
 	if((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		sysfail("socket()");
 	
+	if ((fcntl(sd, F_SETFL, O_NONBLOCK) < 0)) {
+		close(sd);
+		sysfail("fcntl() failed");
+	}
+	
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
 	addr.sin_port = htons(DEFAULT_PORT);
 	addr.sin_addr.s_addr = (((((25 << 8) | 126) << 8) | 8) << 8) | 128; // DEFAULT_IP
 
-	if (connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-		close(sd);
-		sysfail("connect()");
-	}
-
-	prt("Connected to first peer at %s:%d\n", DEFAULT_IP, DEFAULT_PORT);
+	connect(sd, (struct sockaddr *)&addr, sizeof addr);
+	
+	fd_set wfds;
+	struct timeval tv;
+	
+	FD_ZERO(&wfds);
+	FD_SET(sd, &wfds);
+	tv.tv_sec = 5;
+	tv.tv_usec = 0;
+	
+	int rv = select(sd + 1, NULL, &wfds, NULL, &tv);
+	if (rv <= 0) {
+		if (rv < 0)
+			perror("select()");
+		prt("Failed to reach first peer at %s:%d.\n", DEFAULT_IP, DEFAULT_PORT);
+		return -1;
+	} else
+		prt("Connected to first peer at %s:%d.\n", DEFAULT_IP, DEFAULT_PORT);
+	
 	return sd;
 }
 
@@ -140,8 +173,56 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 }
 
 void send_version(CBPeer *peer){
-	deb("Prepare version msg for peer at sock %d\n", peer->socketID);
+	//deb("Prepare version msg for peer at sock %d\n", peer->socketID);
+	int sd = peer->socketID;
 	
+    CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
+    CBByteArray *ua = CBNewByteArrayFromString("cmsc417versiona", '\00');
+    CBNetworkAddress * sourceAddr = CBNewNetworkAddress(0, ip, 0, CB_SERVICE_FULL_BLOCKS, false);
+    int32_t vers = 70001;
+    int nonce = rand();
+    CBVersion * version = CBNewVersion(vers, CB_SERVICE_FULL_BLOCKS, time(NULL), &peer->base, sourceAddr, nonce, ua, 0);
+    CBMessage *message = CBGetMessage(version);
+    char header[24];
+    memcpy(header + CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12);
+
+    /* Compute length, serialized, and checksum */
+    uint32_t len = CBVersionCalculateLength(version);
+    message->bytes = CBNewByteArrayOfSize(len);
+    len = CBVersionSerialise(version, false);
+    if (message->bytes) {
+        // Make checksum
+        uint8_t hash[32];
+        uint8_t hash2[32];
+        CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
+        CBSha256(hash, 32, hash2);
+        message->checksum[0] = hash2[0];
+        message->checksum[1] = hash2[1];
+        message->checksum[2] = hash2[2];
+        message->checksum[3] = hash2[3];
+    }
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
+    // Checksum
+    memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+
+    // Send the header
+    int rv = send(sd, header, 24, 0);
+    if (rv < 0) {
+    	perror("send()");
+    	return;
+    }
+    
+    // Send the message
+    deb("message len: %d\n", message->bytes->length);
+    deb("checksum: %x\n", *((uint32_t *) message->checksum));
+    print_hex(message->bytes);
+	rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
+    if (rv < 0) {
+    	perror("send()");
+    	return;
+    }
+    
 	peer->versionSent = true;
 }
 
@@ -153,27 +234,34 @@ int main(int argc, char *argv[]){
 	// Create socket to detect incoming connections
 	int listen_sd = listen_at(DEFAULT_PORT);
 	
-	// Connect to initial peer
-	CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
-	CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
-	CBPeer *init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
-	init_peer->socketID = connect_first_peer();
-	init_peer->versionSent = false;
-	
-	// Add initial peer to list of peers
+	// Create list of peers
 	CBAssociativeArray peers;
 	if (!CBInitAssociativeArray(&peers, CBKeyCompare, CBReleaseObject))
 		fail("Could not create associative array for peers.\n");
-	if (!add_peer(&peers, init_peer))
-		fail("Could not insert first peer.\n");
+	
+	// Connect to initial peer
+	CBPeer *init_peer = NULL;
+	int first_peer_sd = connect_first_peer();
+	if (first_peer_sd > 0) {
+		CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
+		CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
+		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
+		init_peer->socketID = first_peer_sd;
+		init_peer->versionSent = false;
+		
+		// Add initial peer to list of peers
+		if (!add_peer(&peers, init_peer))
+			prt("Could not insert first peer.\n");
+	}
 	
 	struct pollfd fds[200];
+	char buffer[BUFSIZ];
 	int nfds = 0, current_size;
 	int new_sd;
 	int rv;
 	int timeout = 60 * 1000; // 1 minute
-	int i;
-	bool running = true;
+	int i, j, len;
+	bool running = true, compress_array = false;
 	CBPosition it;
 
 	memset(fds, 0 , sizeof(fds));
@@ -199,15 +287,22 @@ int main(int argc, char *argv[]){
 	}
 	
 	while (running) {
+		// Outgoing messages to peers
+		if (CBAssociativeArrayGetFirst(&peers, &it)) {
+			do {
+				CBPeer *peer = it.node->elements[it.index];
+				if (!peer->versionSent)
+					send_version(peer);
+			} while (!CBAssociativeArrayIterate(&peers, &it));
+		}
+		
 		rv = poll(fds, nfds, timeout);
 		if (rv < 0) {
 			perror("poll()");
 			break;
 		}
-		
 		if (rv == 0) {
-			// Timeout. Nothing really matters...
-			continue;
+			continue; // timeout
 		}
 
 		// Readable sockets exist. Find them.
@@ -242,7 +337,7 @@ int main(int argc, char *argv[]){
 						}
 						break;
 					}
-
+					
 					deb("New incoming connection: %d\n", new_sd);
 					fds[nfds].fd = new_sd;
 					fds[nfds].events = POLLIN;
@@ -250,21 +345,64 @@ int main(int argc, char *argv[]){
 				} while (new_sd != -1);
 			} else {
 				// Not listening socket. Check other connections.
-				prt("Descriptor %d is readable.\n", fds[i].fd);
+				//deb("Descriptor %d is readable.\n", fds[i].fd);
+				CBPeer *peer = NULL;
+				bool closing = false;
+				
+				if (CBAssociativeArrayGetFirst(&peers, &it)) {
+					do {
+						peer = it.node->elements[it.index];
+						if (peer->socketID == fds[i].fd) {
+							//deb("Desc %d is a peer.\n", peer->socketID);
+							break;
+						}
+					} while (!CBAssociativeArrayIterate(&peers, &it));
+				}
+				
+				do {
+					rv = recv(fds[i].fd, buffer, sizeof(buffer), 0);
+					if (rv < 0) {
+						if (errno != EWOULDBLOCK) {
+							// Unexpected error
+							perror("recv() failed");
+							closing = true;
+						} // else EWOULDBLOCK: all data received
+						break;
+					}
+					if (rv == 0) {
+						deb("Connection closed by the other side.\n");
+						closing = true;
+						break;
+					}
+
+					len = rv;
+					deb("%d bytes received\n", len);
+				} while(true);
+				
+				if (closing) {
+					close(fds[i].fd);
+					fds[i].fd = -1;
+					compress_array = true;
+				}
+			}
+		} // descriptor loop
+
+		// Some connections were closed. Remove their descriptors.
+		// Squeeze together the array (moving .fd fields).
+		// The other fields are always the same (events = POLLIN), so we let them be.
+		if (compress_array) {
+			compress_array = false;
+			for (i = 0; i < nfds; i++) {
+				if (fds[i].fd == -1) {
+					for(j = i; j < nfds; j++) {
+						fds[j].fd = fds[j+1].fd;
+					}
+					nfds--;
+				}
 			}
 		}
-	
-		// Outgoing messages to peers
-		/*
-		if (CBAssociativeArrayGetFirst(&peers, &it)) {
-			do {
-				CBPeer *peer = it.node->elements[it.index];
-				if (!peer->versionSent)
-					send_version(peer);
-			} while (!CBAssociativeArrayIterate(&peers, &it));
-		}
-		*/
-	}
+
+	} // infinity
 	
 	// Free all peer objects and close associated sockets
 	CBFreeAssociativeArray(&peers);

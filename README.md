@@ -33,6 +33,11 @@ Pending:
 - Simple features like versioning will be function calls
 - Time-consuming stuff like mining should be in another thread to avoid blocking
 
+## References
+
+- poll() code from [IBM](http://pic.dhe.ibm.com/infocenter/iseries/v6r1m0/index.jsp?topic=/rzab6/poll.htm)
+- [cbitcoin](https://github.com/MatthewLM/cbitcoin)
+
 ## Notes
 
 ### Variable length integer
