@@ -3,8 +3,10 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <netinet/in.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -78,23 +80,34 @@ int command(){
 }
 
 int listen_at(in_port_t port){
-	int sock;
-	if ((sock = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
-		sysfail("socket()");
-	
+	int sd, opt;
 	struct sockaddr_in addr;
+	
+	if ((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
+		sysfail("socket() failed");
+	
+	if ((setsockopt(sd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt)) < 0)) {
+		close(sd);
+		sysfail("setsockopt() failed");
+	}
+	
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_ANY); // any incoming interface?
+	addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	addr.sin_port = htons(port);
 	
-	if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0)
-		sysfail("bind()");
-	if (listen(sock, MAX_PENDING) < 0)
-		sysfail("listen()");
+	if (bind(sd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+		close(sd);
+		sysfail("bind() failed");
+	}
+	
+	if (listen(sd, MAX_PENDING) < 0) {
+		close(sd);
+		sysfail("listen() failed");
+	}
 	
 	prt("Listening at port %d\n", port);
-	return sock;
+	return sd;
 }
 
 int connect_first_peer(){
@@ -108,19 +121,13 @@ int connect_first_peer(){
 	addr.sin_port = htons(DEFAULT_PORT);
 	addr.sin_addr.s_addr = (((((25 << 8) | 126) << 8) | 8) << 8) | 128; // DEFAULT_IP
 
-	if (connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0)
+	if (connect(sd, (struct sockaddr *)&addr, sizeof addr) < 0) {
+		close(sd);
 		sysfail("connect()");
+	}
 
 	prt("Connected to first peer at %s:%d\n", DEFAULT_IP, DEFAULT_PORT);
 	return sd;
-}
-
-void release_peer(void *peer){
-	// When the array is freed, free all peers in it and close their sockets
-	CBPeer *p = peer;
-	deb("Closing socket %d\n", p->socketID);
-	close(p->socketID);
-	CBReleaseObject(p);
 }
 
 bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
@@ -144,7 +151,7 @@ int main(int argc, char *argv[]){
 	help();
 	
 	// Create socket to detect incoming connections
-	int serv_sock = listen_at(DEFAULT_PORT);
+	int listen_sd = listen_at(DEFAULT_PORT);
 	
 	// Connect to initial peer
 	CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
@@ -155,66 +162,100 @@ int main(int argc, char *argv[]){
 	
 	// Add initial peer to list of peers
 	CBAssociativeArray peers;
-	if (!CBInitAssociativeArray(&peers, CBKeyCompare, release_peer))
+	if (!CBInitAssociativeArray(&peers, CBKeyCompare, CBReleaseObject))
 		fail("Could not create associative array for peers.\n");
 	if (!add_peer(&peers, init_peer))
 		fail("Could not insert first peer.\n");
 	
-	fd_set rfds;
-	struct timeval tv;
-	int retval;
-	int max_descriptor = serv_sock;
+	struct pollfd fds[200];
+	int nfds = 0, current_size;
+	int new_sd;
+	int rv;
+	int timeout = 60 * 1000; // 1 minute
+	int i;
 	bool running = true;
 	CBPosition it;
 
+	memset(fds, 0 , sizeof(fds));
+	
+	// Watch initial listening socket
+	fds[0].fd = listen_sd;
+	fds[0].events = POLLIN;
+	nfds++;
+
+	// Watch keyboard input
+	fds[1].fd = STDIN_FILENO;
+	fds[1].events = POLLIN;
+	nfds++;
+
+	// Watch initial peers
+	if (CBAssociativeArrayGetFirst(&peers, &it)) {
+		do {
+			CBPeer *peer = it.node->elements[it.index];
+			fds[nfds].fd = peer->socketID;
+			fds[nfds].events = POLLIN;
+			nfds++;
+		} while (!CBAssociativeArrayIterate(&peers, &it));
+	}
+	
 	while (running) {
-		// Watch stdin for user input
-		FD_ZERO(&rfds);
-		FD_SET(STDIN_FILENO, &rfds);
+		rv = poll(fds, nfds, timeout);
+		if (rv < 0) {
+			perror("poll()");
+			break;
+		}
 		
-		// Watch default port for new peers
-		FD_SET(serv_sock, &rfds);
-		
-		// Watch all peers
-		if (CBAssociativeArrayGetFirst(&peers, &it)) {
-			do {
-				CBPeer *peer = it.node->elements[it.index];
-				int sockID = peer->socketID;
-				FD_SET(sockID, &rfds);
-				if (sockID > max_descriptor)
-					max_descriptor = sockID;
-			} while (!CBAssociativeArrayIterate(&peers, &it));
+		if (rv == 0) {
+			// Timeout. Nothing really matters...
+			continue;
 		}
 
-		// Wait up to five seconds
-		tv.tv_sec = 0;
-		tv.tv_usec = 0;
+		// Readable sockets exist. Find them.
+		current_size = nfds;
+		for (i = 0; i < current_size; i++) {
+			// Nothing happens
+			if(fds[i].revents == 0)
+				continue;
 
-		retval = select(max_descriptor, &rfds, NULL, NULL, &tv);
-
-		if (retval == -1) {
-			perror("select()");
-		} else if (retval) {
-			if (FD_ISSET(STDIN_FILENO, &rfds))
-				if (!command())
-					running = false;
-			
-			// Handle incoming messages on peer connections
-			if (CBAssociativeArrayGetFirst(&peers, &it)) {
-				do {
-					CBPeer *peer = it.node->elements[it.index];
-					if (!FD_ISSET(peer->socketID, &rfds))
-						continue;
-					deb("Something at %d\n", peer->socketID);
-				} while (!CBAssociativeArrayIterate(&peers, &it));
+			// We will not deal with unexpected events
+			if(fds[i].revents != POLLIN) {
+				printf("Error: revents = %d\n", fds[i].revents);
+				running = false;
+				break;
 			}
 			
-			
-		} else {
-			// Nothing really matters...
-		}
+			if (fds[i].fd == STDIN_FILENO) {
+				// User input
+				if (!command())
+					running = false;
+			} else if (fds[i].fd == listen_sd) {
+				// Listening socket is readable
+				// Accept incoming connections: possible new peers
+				do {
+					// If accept fails with EWOULDBLOCK, then all incoming connections
+					// have been accepted. Other failures will end the program.
+					new_sd = accept(listen_sd, NULL, NULL);
+					if (new_sd < 0) {
+						if (errno != EWOULDBLOCK) {
+							perror("accept() failed");
+							running = false;
+						}
+						break;
+					}
 
+					deb("New incoming connection: %d\n", new_sd);
+					fds[nfds].fd = new_sd;
+					fds[nfds].events = POLLIN;
+					nfds++;
+				} while (new_sd != -1);
+			} else {
+				// Not listening socket. Check other connections.
+				prt("Descriptor %d is readable.\n", fds[i].fd);
+			}
+		}
+	
 		// Outgoing messages to peers
+		/*
 		if (CBAssociativeArrayGetFirst(&peers, &it)) {
 			do {
 				CBPeer *peer = it.node->elements[it.index];
@@ -222,12 +263,15 @@ int main(int argc, char *argv[]){
 					send_version(peer);
 			} while (!CBAssociativeArrayIterate(&peers, &it));
 		}
+		*/
 	}
 	
 	// Free all peer objects and close associated sockets
 	CBFreeAssociativeArray(&peers);
-	
-	close(serv_sock);
+	for (i = 0; i < nfds; i++)
+		if (fds[i].fd >= 0)
+			close(fds[i].fd);
+
 	return 0;
 }
 
