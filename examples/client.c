@@ -223,6 +223,67 @@ void send_version(CBPeer *peer){
 	peer->versionSent = true;
 }
 
+bool read_message(int sd, CBPeer *peer){
+	// return false to close current socket and remove peer
+	
+	if (!peer)
+		return false; // should not happen
+	
+	// Read the header
+	char header[24];
+	socklen_t nread = 0;
+	nread = recv(sd, header, 24, 0);
+	if (nread < 0) {
+		if (errno != EWOULDBLOCK) {
+			// Unexpected error
+			perror("recv() failed");
+			return false;
+		}
+	} else if (nread == 0) {
+		deb("empty header\n");
+		return true;
+	}
+	
+	deb("<==\nreceived header\n");
+	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
+		printf("wrong netmagic\n");
+		return true;
+	}
+	
+	// Read the payload
+	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
+	char *payload = (char *) malloc(length);
+	nread = 0;
+	if (length) nread = recv(sd, payload, length, 0);
+	if (nread != length) {
+		deb("incomplete read %u %u \n", nread, length);
+	} else {
+		deb("read payload of %u bytes\n", nread);
+	}
+	
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
+		prt("received version header\n");
+	}
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
+		prt("received verack header\n");
+	}
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
+		prt("received ping header\n");
+	}
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
+		prt("received pong header\n");
+	}
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
+		prt("received inv header\n");
+	}
+	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
+		prt("received addr header\n");
+	}
+	
+	deb("==>\n");
+	return true;
+}
+
 int main(int argc, char *argv[]){
 	prt("CMSC417: Rudimentary bitcoin client.\n");
 	prt("Andrew Badger, Thach Hoang. 2013.\n");
@@ -245,6 +306,7 @@ int main(int argc, char *argv[]){
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
 		init_peer->versionSent = false;
+		init_peer->getAddresses = false;
 		send_version(init_peer);
 		
 		// Add initial peer to list of peers
@@ -253,14 +315,14 @@ int main(int argc, char *argv[]){
 	}
 	
 	struct pollfd fds[200];
-	char buffer[BUFSIZ];
 	int nfds = 0, current_size;
-	int new_sd;
+	int new_sd = 0;
 	int rv;
 	int timeout = 60 * 1000; // 1 minute
-	int i, j, len;
+	int i, j;
 	bool running = true, compress_array = false;
 	CBPosition it;
+	CBPeer *peer = NULL;
 
 	memset(fds, 0 , sizeof(fds));
 	
@@ -277,7 +339,7 @@ int main(int argc, char *argv[]){
 	// Watch initial peers
 	if (CBAssociativeArrayGetFirst(&peers, &it)) {
 		do {
-			CBPeer *peer = it.node->elements[it.index];
+			peer = it.node->elements[it.index];
 			fds[nfds].fd = peer->socketID;
 			fds[nfds].events = POLLIN;
 			nfds++;
@@ -285,6 +347,16 @@ int main(int argc, char *argv[]){
 	}
 	
 	while (running) {
+		// Outgoing messages
+		peer = NULL;
+		/*
+		if (CBAssociativeArrayGetFirst(&peers, &it)) {
+			do {
+				peer = it.node->elements[it.index];
+			} while (!CBAssociativeArrayIterate(&peers, &it));
+		}
+		*/
+		
 		rv = poll(fds, nfds, timeout);
 		if (rv < 0) {
 			perror("poll()");
@@ -318,6 +390,12 @@ int main(int argc, char *argv[]){
 				do {
 					// If accept fails with EWOULDBLOCK, then all incoming connections
 					// have been accepted. Other failures will end the program.
+					
+					// TODO: when accepting connections, create a new peer object,
+					// assign to it proper network addr and socket, finally add socket
+					// to the watch list of poll(). Uncomment and finish the following block.
+					
+					/*
 					new_sd = accept(listen_sd, NULL, NULL);
 					if (new_sd < 0) {
 						if (errno != EWOULDBLOCK) {
@@ -327,17 +405,19 @@ int main(int argc, char *argv[]){
 						break;
 					}
 					
-					deb("New incoming connection: %d\n", new_sd);
 					fds[nfds].fd = new_sd;
 					fds[nfds].events = POLLIN;
 					nfds++;
+					
+					deb("New incoming connection: %d\n", new_sd);
+					*/
+					
+					deb("New incoming connection: not handled\n");
 				} while (new_sd != -1);
 			} else {
 				// Not listening socket. Check other connections.
 				//deb("Descriptor %d is readable.\n", fds[i].fd);
-				CBPeer *peer = NULL;
-				bool closing = false;
-				
+				peer = NULL;
 				if (CBAssociativeArrayGetFirst(&peers, &it)) {
 					do {
 						peer = it.node->elements[it.index];
@@ -348,30 +428,12 @@ int main(int argc, char *argv[]){
 					} while (!CBAssociativeArrayIterate(&peers, &it));
 				}
 				
-				do {
-					rv = recv(fds[i].fd, buffer, sizeof(buffer), 0);
-					if (rv < 0) {
-						if (errno != EWOULDBLOCK) {
-							// Unexpected error
-							perror("recv() failed");
-							closing = true;
-						} // else EWOULDBLOCK: all data received
-						break;
-					}
-					if (rv == 0) {
-						deb("Connection closed by the other side.\n");
-						closing = true;
-						break;
-					}
-
-					len = rv;
-					deb("%d bytes received\n", len);
-				} while(true);
-				
-				if (closing) {
+				bool success = read_message(fds[i].fd, peer);
+				if (!success) {
 					close(fds[i].fd);
 					fds[i].fd = -1;
 					compress_array = true;
+					CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
 				}
 			}
 		} // descriptor loop
