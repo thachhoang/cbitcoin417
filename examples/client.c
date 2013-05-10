@@ -292,11 +292,11 @@ void send_version(CBPeer *peer){
 	CBFreeByteArray(ua);
 }
 
-bool read_message(int sd, CBPeer **peer_ptr){
+bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	// Return false to close current socket and remove peer
-	CBPeer *peer = *peer_ptr;
 	bool new_peer = !peer;
-	
+	if(new_peer) deb("new peer at %d\n", sd);
+	else deb("old peer at %d\n", sd);
 	// Read the header
 	char header[24];
 	socklen_t nread = 0;
@@ -308,8 +308,8 @@ bool read_message(int sd, CBPeer **peer_ptr){
 			return false;
 		}
 	} else if (nread == 0) {
-		deb("empty header\n");
-		return !new_peer; // if new peer, close socket
+		deb("closed connection\n");
+		return false;
 	}
 	
 	deb("<==\nreceived header\n");
@@ -349,12 +349,15 @@ bool read_message(int sd, CBPeer **peer_ptr){
 			prt_ip(version->addSource->ip);
 			prt(":%d.\n", version->addSource->port);
 			
-			*peer_ptr = CBNewPeerByTakingNetworkAddress(version->addSource);
-			(*peer_ptr)->socketID = sd;
-			(*peer_ptr)->versionSent = false;
-			(*peer_ptr)->versionAck = false;
-			(*peer_ptr)->getAddresses = false;
-			peer = *peer_ptr;
+			peer = CBNewPeerByTakingNetworkAddress(version->addSource);
+			peer->socketID = sd;
+			peer->versionSent = false;
+			peer->versionAck = false;
+			peer->getAddresses = false;
+			
+			// A new peer is created following a version exchange.
+			if (!add_peer(peers, peer))
+				prt("Could not insert peer.\n");
 		}
 		if (peer) {
 			peer->versionMessage = version;
@@ -538,18 +541,20 @@ int main(int argc, char *argv[]){
 			} else {
 				// Not listening socket. Check other connections.
 				peer = NULL;
-				bool not_found = true;
+				bool found = false;
 				if (CBAssociativeArrayGetFirst(&peers, &it)) {
 					do {
 						peer = it.node->elements[it.index];
 						if (peer->socketID == fds[i].fd) {
-							not_found = false;
+							found = true;
 							break;
 						}
 					} while (!CBAssociativeArrayIterate(&peers, &it));
 				}
 				
-				bool success = read_message(fds[i].fd, &peer);
+				if (!found) peer = NULL;
+				
+				bool success = read_message(fds[i].fd, peer, &peers);
 				if (!success) {
 					deb("Closing %d\n", fds[i].fd);
 					close(fds[i].fd);
@@ -557,10 +562,6 @@ int main(int argc, char *argv[]){
 					compress_array = true;
 					if (peer)
 						CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
-				} else if (not_found && peer) {
-					// A new peer is created following a version exchange.
-					if (!add_peer(&peers, init_peer))
-						prt("Could not insert peer.\n");
 				}
 			}
 		} // descriptor loop
@@ -583,11 +584,11 @@ int main(int argc, char *argv[]){
 	} // infinity
 	
 	// Free all peer objects and close associated sockets
-	CBFreeAssociativeArray(&peers);
 	for (i = 0; i < nfds; i++)
 		if (fds[i].fd >= 0)
 			close(fds[i].fd);
 
+	CBFreeAssociativeArray(&peers);
 	return 0;
 }
 
