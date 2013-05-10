@@ -1,26 +1,5 @@
 Authors: Andrew Badger, Thach Hoang
 
-## Setup
-
-Install libraries:
-
-```
-sudo apt-get install libssl-dev
-sudo apt-get install libev-dev
-```
-
-Add this line to .bashrc (use absolute path to /bitcoin417/bin):
-
-```
-export LD_LIBRARY_PATH=~/Documents/project/bitcoin417/bin:$LD_LIBRARY_PATH
-```
-
-Finally in /bitcoin417:
-
-```
-./configure; make clean; make examples-build
-```
-	
 ## Ideas
 
 Done:
@@ -28,12 +7,12 @@ Done:
 - Use select() in a loop to monitor everything
 - Peer objects are collected in CBAssociativeArray
 - At the start, actively connect to initial peers (kale.cs.umd.edu)
+- Accept incoming connections, create new sockets and save them in corresponding peer objects
 
 Pending:
 
-- Accept incoming connections, create new sockets and save them in corresponding peer objects
-- Simple features like versioning will be function calls
-- Time-consuming stuff like mining should be in another thread to avoid blocking
+- Send a get-address message to each peer (once?), then try to connect to the results
+- Ping/pong (new thread? CBAssociativeArray is not thread-safe)
 
 ## References
 
@@ -55,4 +34,25 @@ If that first byte is 253, read the next two bytes as a little endian 16-bit num
 If that first byte is 254, read the next four bytes as a little endian 32-bit number (total bytes read = 5).
 
 If that first byte is 255, read the next eight bytes as a little endian 64-bit number (total bytes read = 9).
+
+## Setup
+
+Install libraries:
+
+```
+sudo apt-get install libssl-dev
+sudo apt-get install libev-dev
+```
+
+Add this line to .bashrc (use absolute path to /bitcoin417/bin):
+
+```
+export LD_LIBRARY_PATH=~/Documents/project/bitcoin417/bin:$LD_LIBRARY_PATH
+```
+
+Finally in /bitcoin417:
+
+```
+./configure; make clean; make examples-build
+```
 

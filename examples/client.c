@@ -52,13 +52,20 @@ void help(){
 	prt("commands: [cmd] [argument] ... \n");
 	prt("    help : shows this message\n");
 	prt("    quit : quits\n");
-	prt("    version : sends version message client\n");
+	prt("    version : sends version message to initial peer\n");
 	prt("    peers : returns the number of connected peers\n");
 	prt("    ping : sends ping message to connected client\n");
 	prt("\n");
 }
 
 static void prt_hex(CBByteArray *str) {
+	int i = 0;
+	uint8_t *ptr = str->sharedData->data;
+	for (; i < str->length; i++) prt("%02x", ptr[str->offset + i]);
+	prt("\n");
+}
+
+static void deb_hex(CBByteArray *str) {
 	int i = 0;
 	uint8_t *ptr = str->sharedData->data;
 	for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
@@ -183,11 +190,43 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 
 void send_verack(CBPeer *peer){
 	// TODO
-	deb("Sending verack (TODO): %d\n", peer->socketID);
+	if (!peer->versionSent)
+		return;
+	
+	prt("Sending verack: ");
+	prt_ip(peer->versionMessage->addSource->ip);
+	prt("\n");
+	int sd = peer->socketID;
+	
+    char header[24];
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, 0);
+    memcpy(header + CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12);
+
+	uint8_t hash[32];
+	uint8_t hash2[32];
+	uint8_t checksum[4];
+	CBByteArray *empty = CBNewByteArrayFromString("", false);
+	CBSha256(CBByteArrayGetData(empty), 0, hash);
+	CBSha256(hash, 32, hash2);
+	checksum[0] = hash2[0];
+	checksum[1] = hash2[1];
+	checksum[2] = hash2[2];
+	checksum[3] = hash2[3];
+    memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, checksum, 4);
+    
+	int rv = send(sd, header, 24, 0);
+	if (rv < 0) {
+		perror("send()");
+		return;
+	}
+	
+	//deb_hex(CBNewByteArrayWithDataCopy((uint8_t *)header, 24));
+	CBFreeByteArray(empty);
 }
 
 void send_version(CBPeer *peer){
-	deb("Sending version: %d\n", peer->socketID);
+	deb("Sending version: socket %d\n", peer->socketID);
 	int sd = peer->socketID;
 	
     CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
@@ -228,13 +267,22 @@ void send_version(CBPeer *peer){
     }
     
     // Send the message
-    //deb("message len: %d\n", message->bytes->length);
-    //deb("checksum: %x\n", *((uint32_t *) message->checksum));
-    //prt_hex(message->bytes);
-	rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
-    if (rv < 0) {
-    	perror("send()");
-    	return;
+    if (peer->versionSent) {
+		prt("A version message has already been sent to this peer (");
+		prt_ip(peer->versionMessage->addSource->ip);
+		prt("). It will not respond. Here's what we would've sent.\n");
+		prt("Message length: %d\n", message->bytes->length);
+		prt("Checksum: %x\n", *((uint32_t *) message->checksum));
+		prt_hex(message->bytes);
+    } else {
+		deb("message len: %d\n", message->bytes->length);
+		deb("checksum: %x\n", *((uint32_t *) message->checksum));
+		deb_hex(message->bytes);
+		rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
+	    if (rv < 0) {
+    		perror("send()");
+    		return;
+    	}
     }
     
 	peer->versionSent = true;
@@ -305,6 +353,7 @@ bool read_message(int sd, CBPeer **peer_ptr){
 			(*peer_ptr)->socketID = sd;
 			(*peer_ptr)->versionSent = false;
 			(*peer_ptr)->versionAck = false;
+			(*peer_ptr)->getAddresses = false;
 			peer = *peer_ptr;
 		}
 		if (peer) {
@@ -314,8 +363,8 @@ bool read_message(int sd, CBPeer **peer_ptr){
 			send_verack(peer);
 		}
 	} else if (new_peer) {
-			deb("No version message from new peer: closing %d\n", sd);
-			return false; // no version message, no peer, close connection
+		deb("No version message from new peer: closing %d\n", sd);
+		return false; // no version message, no peer, close connection
 	}
 	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
