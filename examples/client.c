@@ -32,10 +32,12 @@ void deb(const char *, ...);	// printf only in debug mode
 //#define NETMAGIC 0x0709110B // testnet
 #define NETMAGIC 0xd0b4bef9 // umdnet
 
-#define DEFAULT_IP		"128.8.126.5" // local satoshi: kale.cs.umd.edu
-#define DEFAULT_PORT	28333
+#define DEFAULT_IP      (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25} // local satoshi: kale.cs.umd.edu
+#define DEFAULT_PORT    28333
+#define SELF_IP         (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}
+#define SELF_PORT       28333
 
-#define MAX_PENDING 5		// backlog size for listen()
+#define MAX_PENDING 20		// backlog size for listen()
 
 typedef enum{
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
@@ -58,6 +60,10 @@ void help(){
 	prt("\n");
 }
 
+static void str_ip(char *buffer, uint8_t *ip, int offset) {
+	sprintf(buffer, "%d.%d.%d.%d", ip[offset], ip[offset+1], ip[offset+2], ip[offset+3]);
+}
+
 static void prt_hex(CBByteArray *str) {
 	int i = 0;
 	uint8_t *ptr = str->sharedData->data;
@@ -73,9 +79,11 @@ static void deb_hex(CBByteArray *str) {
 }
 
 static void prt_ip(CBByteArray *str) {
-	int i = 12;
-	uint8_t *ptr = str->sharedData->data;
-	for (; i < str->length; i++) prt((i == str->length - 1) ? "%d" : "%d.", ptr[str->offset + i]);
+	char *buffer = malloc(str->length * sizeof(char));
+	uint8_t *ptr = str->sharedData->data + str->offset;
+	str_ip(buffer, ptr, 12);
+	prt("%s", buffer);
+	free(buffer);
 }
 
 int command(){
@@ -142,7 +150,7 @@ int listen_at(in_port_t port){
 	return sd;
 }
 
-int connect_first_peer(){
+int connect_peer(uint8_t* arr, in_port_t port){
 	int sd;
 	if((sd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP)) < 0)
 		sysfail("socket()");
@@ -155,8 +163,8 @@ int connect_first_peer(){
 	struct sockaddr_in addr;
 	memset(&addr, 0, sizeof(addr));
 	addr.sin_family = AF_INET;
-	addr.sin_port = htons(DEFAULT_PORT);
-	addr.sin_addr.s_addr = (((((25 << 8) | 126) << 8) | 8) << 8) | 128; // DEFAULT_IP
+	addr.sin_port = htons(port);
+	addr.sin_addr.s_addr = (((((arr[15] << 8) | arr[14]) << 8) | arr[13]) << 8) | arr[12];
 
 	connect(sd, (struct sockaddr *)&addr, sizeof addr);
 	
@@ -168,15 +176,18 @@ int connect_first_peer(){
 	tv.tv_sec = 5;
 	tv.tv_usec = 0;
 	
+	char *addr_str = calloc(200, sizeof(char));
+	str_ip(addr_str, arr, 12);
 	int rv = select(sd + 1, NULL, &wfds, NULL, &tv);
 	if (rv <= 0) {
 		if (rv < 0)
 			perror("select()");
-		prt("Failed to reach first peer at %s:%d.\n", DEFAULT_IP, DEFAULT_PORT);
+		prt("Failed to reach first peer at %s:%d.\n", addr_str, port);
 		return -1;
 	} else
-		prt("Connected to first peer at %s:%d.\n", DEFAULT_IP, DEFAULT_PORT);
+		prt("Connected to first peer at %s:%d.\n", addr_str, port);
 	
+	free(addr_str);
 	return sd;
 }
 
@@ -189,7 +200,6 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 }
 
 void send_verack(CBPeer *peer){
-	// TODO
 	if (!peer->versionSent)
 		return;
 	
@@ -229,9 +239,9 @@ void send_version(CBPeer *peer){
 	deb("Sending version: socket %d\n", peer->socketID);
 	int sd = peer->socketID;
 	
-    CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}, 16);
+    CBByteArray *ip = CBNewByteArrayWithDataCopy(SELF_IP, 16);
     CBByteArray *ua = CBNewByteArrayFromString("cmsc417versiona", '\00');
-    CBNetworkAddress * sourceAddr = CBNewNetworkAddress(0, ip, 0, CB_SERVICE_FULL_BLOCKS, false);
+    CBNetworkAddress * sourceAddr = CBNewNetworkAddress(0, ip, SELF_PORT, CB_SERVICE_FULL_BLOCKS, false);
     int32_t vers = 70001;
     int nonce = rand();
     CBVersion * version = CBNewVersion(vers, CB_SERVICE_FULL_BLOCKS, time(NULL), &peer->base, sourceAddr, nonce, ua, 0);
@@ -402,7 +412,7 @@ int main(int argc, char *argv[]){
 	help();
 	
 	// Create socket to detect incoming connections
-	int listen_sd = listen_at(DEFAULT_PORT);
+	int listen_sd = listen_at(SELF_PORT);
 	
 	// Create list of peers
 	CBAssociativeArray peers;
@@ -411,9 +421,9 @@ int main(int argc, char *argv[]){
 	
 	// Connect to initial peer
 	CBPeer *init_peer = NULL;
-	int first_peer_sd = connect_first_peer();
+	int first_peer_sd = connect_peer(DEFAULT_IP, DEFAULT_PORT);
 	if (first_peer_sd > 0) {
-		CBByteArray *ip = CBNewByteArrayWithDataCopy((uint8_t [16]){0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25}, 16);
+		CBByteArray *ip = CBNewByteArrayWithDataCopy(DEFAULT_IP, 16);
 		CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
