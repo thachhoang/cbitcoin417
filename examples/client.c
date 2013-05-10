@@ -44,24 +44,35 @@ typedef enum{
 	CB_MESSAGE_HEADER_CHECKSUM = 20,	// The checksum of the message
 } CBMessageHeaderOffsets;
 
+typedef enum{
+	DEFAULT, PING, PEERS, QUIT, VERSION
+} commands;
+
 void help(){
 	prt("commands: [cmd] [argument] ... \n");
 	prt("    help : shows this message\n");
 	prt("    quit : quits\n");
 	prt("    version : sends version message client\n");
+	prt("    peers : returns the number of connected peers\n");
 	prt("    ping : sends ping message to connected client\n");
 	prt("\n");
 }
 
-static void print_hex(CBByteArray *str) {
+static void prt_hex(CBByteArray *str) {
 	int i = 0;
 	uint8_t *ptr = str->sharedData->data;
 	for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
 	deb("\n");
 }
 
+static void prt_ip(CBByteArray *str) {
+	int i = 12;
+	uint8_t *ptr = str->sharedData->data;
+	for (; i < str->length; i++) prt((i == str->length - 1) ? "%d" : "%d.", ptr[str->offset + i]);
+}
+
 int command(){
-	int rv = 1;
+	int rv = DEFAULT;
 	// Read a line
 	char *line = 0;
 	size_t len = 0;
@@ -70,18 +81,21 @@ int command(){
 	sscanf(line, " %s ", cmd);
 
 	// Main interactive command dispatch
-	if (!strcmp(cmd, "ping")) {
-		prt("you said ping\n");
-	} else if (!strcmp(cmd, "help")) {
+	if (!strcmp(cmd, "help")) {
 		help();
+	} else if (!strcmp(cmd, "ping")) {
+		prt("Ping! :(\n");
+		rv = PING;
+	} else if (!strcmp(cmd, "peers")) {
+		rv = PEERS;
 	} else if (!strcmp(cmd, "version")) {
-		prt("sending version (not implemented)\n");
+		rv = VERSION;
 	} else if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) {
-		prt("quitting...\n");
-		rv = 0; // party's over
+		prt("Quitting...\n");
+		rv = QUIT; // party's over
 	} else if (!strcmp(cmd, "")) {
 	} else {
-		prt("command not recognized: '%s'\n", cmd);
+		prt("Command not recognized: '%s'\n", cmd);
 	}
 	
 	free(line);
@@ -117,7 +131,7 @@ int listen_at(in_port_t port){
 		sysfail("listen() failed");
 	}
 	
-	prt("Listening at port %d\n", port);
+	prt("Listening at port %d.\n", port);
 	return sd;
 }
 
@@ -216,7 +230,7 @@ void send_version(CBPeer *peer){
     // Send the message
     //deb("message len: %d\n", message->bytes->length);
     //deb("checksum: %x\n", *((uint32_t *) message->checksum));
-    //print_hex(message->bytes);
+    //prt_hex(message->bytes);
 	rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
     if (rv < 0) {
     	perror("send()");
@@ -230,8 +244,9 @@ void send_version(CBPeer *peer){
 	CBFreeByteArray(ua);
 }
 
-bool read_message(int sd, CBPeer *peer){
+bool read_message(int sd, CBPeer **peer_ptr){
 	// Return false to close current socket and remove peer
+	CBPeer *peer = *peer_ptr;
 	bool new_peer = !peer;
 	
 	// Read the header
@@ -251,56 +266,74 @@ bool read_message(int sd, CBPeer *peer){
 	
 	deb("<==\nreceived header\n");
 	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
-		printf("wrong netmagic\n");
+		deb("wrong netmagic\n");
 		return !new_peer; // if new peer, close socket
 	}
 	
 	// Read the payload
 	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
-	char *payload = (char *) malloc(length);
+	uint8_t *payload = (uint8_t *) malloc(length);
 	nread = 0;
 	if (length) nread = recv(sd, payload, length, 0);
 	if (nread != length) {
 		deb("incomplete read %u %u \n", nread, length);
-		if (new_peer) return false;
+		if (new_peer)
+			return false;
 	} else {
-		deb("read payload of %u bytes\n", nread);
+		if (new_peer || !peer->versionMessage)
+			prt("Incoming message: %u bytes\n", nread);
+		else {
+			prt("Incoming message from ");
+			prt_ip(peer->versionMessage->addSource->ip);
+			prt(": %u bytes\n", nread);
+		}
 	}
 	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
-		prt("received version header\n");
+		deb("received version header\n");
+		CBByteArray *versionBytes = CBNewByteArrayWithDataCopy(payload, length);
+		CBVersion *version = CBNewVersionFromData(versionBytes);
+		CBVersionDeserialise(version);
+		//prt_ip(version->addRecv->ip); prt("\n");
 		if (new_peer) {
-			deb("Correct version message: make conn(%d) a peer\n", sd);
-			// TODO parse address and make this connection a peer
+			// Parse network address and make this connection a peer
+			prt("Correct version message received. New peer at ");
+			prt_ip(version->addSource->ip);
+			prt(":%d.\n", version->addSource->port);
+			
+			*peer_ptr = CBNewPeerByTakingNetworkAddress(version->addSource);
+			(*peer_ptr)->socketID = sd;
+			(*peer_ptr)->versionSent = false;
+			(*peer_ptr)->versionAck = false;
+			peer = *peer_ptr;
 		}
 		if (peer) {
+			peer->versionMessage = version;
 			if (!peer->versionSent)
 				send_version(peer);
 			send_verack(peer);
 		}
-	} else {
-		if (new_peer) {
+	} else if (new_peer) {
 			deb("No version message from new peer: closing %d\n", sd);
 			return false; // no version message, no peer, close connection
-		}
 	}
 	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
-		prt("received verack header\n");
+		deb("received verack header\n");
 		if (peer->versionSent)
 			peer->versionAck = true;
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
-		prt("received ping header\n");
+		deb("received ping header\n");
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
-		prt("received pong header\n");
+		deb("received pong header\n");
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
-		prt("received inv header\n");
+		deb("received inv header\n");
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
-		prt("received addr header\n");
+		deb("received addr header\n");
 	}
 	
 	deb("==>\n");
@@ -403,15 +436,31 @@ int main(int argc, char *argv[]){
 
 			// We will not deal with unexpected events
 			if(fds[i].revents != POLLIN) {
-				printf("Error: revents = %d\n", fds[i].revents);
+				prt("Error: revents = %d\n", fds[i].revents);
 				running = false;
 				break;
 			}
 			
 			if (fds[i].fd == STDIN_FILENO) {
 				// User input
-				if (!command())
+				int rv = command();
+				switch (rv) {
+				case PEERS:
+					prt("Peers: %d\n\n", peers.root->numElements);
+					break;
+				case QUIT:
 					running = false;
+					break;
+				case VERSION:
+					if (init_peer)
+						send_version(init_peer);
+					else
+						prt("Initial peer is not available.\n\n");
+					break;
+				case DEFAULT:
+				default:
+					break;
+				}
 			} else if (fds[i].fd == listen_sd) {
 				// Listening socket is readable
 				// Accept incoming connections: possible new peers
@@ -439,19 +488,19 @@ int main(int argc, char *argv[]){
 				} while (new_sd != -1);
 			} else {
 				// Not listening socket. Check other connections.
-				//deb("Descriptor %d is readable.\n", fds[i].fd);
 				peer = NULL;
+				bool not_found = true;
 				if (CBAssociativeArrayGetFirst(&peers, &it)) {
 					do {
 						peer = it.node->elements[it.index];
 						if (peer->socketID == fds[i].fd) {
-							//deb("Desc %d is a peer.\n", peer->socketID);
+							not_found = false;
 							break;
 						}
 					} while (!CBAssociativeArrayIterate(&peers, &it));
 				}
 				
-				bool success = read_message(fds[i].fd, peer);
+				bool success = read_message(fds[i].fd, &peer);
 				if (!success) {
 					deb("Closing %d\n", fds[i].fd);
 					close(fds[i].fd);
@@ -459,6 +508,10 @@ int main(int argc, char *argv[]){
 					compress_array = true;
 					if (peer)
 						CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
+				} else if (not_found && peer) {
+					// A new peer is created following a version exchange.
+					if (!add_peer(&peers, init_peer))
+						prt("Could not insert peer.\n");
 				}
 			}
 		} // descriptor loop
