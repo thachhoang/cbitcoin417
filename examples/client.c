@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <signal.h>
 #include <string.h>
 
 #include <CBAssociativeArray.h>
@@ -305,8 +306,11 @@ void send_version(CBPeer *peer){
 bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	// Return false to close current socket and remove peer
 	bool new_peer = !peer;
-	if(new_peer) deb("new peer at %d\n", sd);
-	else deb("old peer at %d\n", sd);
+	
+	char end[] = "==>\n\n";
+	deb("<== ");
+	deb(new_peer ? "new peer at %d\n" : "old peer at %d\n", sd);
+	
 	// Read the header
 	char header[24];
 	socklen_t nread = 0;
@@ -322,9 +326,9 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 		return false;
 	}
 	
-	deb("<==\nreceived header\n");
+	deb("received header\n");
 	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
-		deb("wrong netmagic\n");
+		deb("wrong netmagic\n%s", end);
 		return !new_peer; // if new peer, close socket
 	}
 	
@@ -334,7 +338,7 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	nread = 0;
 	if (length) nread = recv(sd, payload, length, 0);
 	if (nread != length) {
-		deb("incomplete read %u %u \n", nread, length);
+		deb("incomplete read %u %u \n%s", nread, length, end);
 		if (new_peer)
 			return false;
 	} else {
@@ -375,8 +379,10 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 				send_version(peer);
 			send_verack(peer);
 		}
+		
+		CBReleaseObject(versionBytes);
 	} else if (new_peer) {
-		deb("No version message from new peer: closing %d\n", sd);
+		deb("No version message from new peer: closing %d\n%s", sd, end);
 		return false; // no version message, no peer, close connection
 	}
 	
@@ -398,7 +404,7 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 		deb("received addr header\n");
 	}
 	
-	deb("==>\n");
+	deb("%s", end);
 	
     // Clean up
     free(payload);
@@ -406,17 +412,27 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	return true;
 }
 
+void free_peer(void *p){
+	CBPeer *peer = (CBPeer *)p;
+	if (peer->versionMessage)
+		CBFreeVersion(peer->versionMessage);
+	CBReleaseObject(peer);
+}
+
 int main(int argc, char *argv[]){
 	prt("CMSC417: Rudimentary bitcoin client.\n");
 	prt("Andrew Badger, Thach Hoang. 2013.\n");
 	help();
+	
+	// Handle connection errors at send() or recv()
+	signal(SIGPIPE, SIG_IGN);
 	
 	// Create socket to detect incoming connections
 	int listen_sd = listen_at(SELF_PORT);
 	
 	// Create list of peers
 	CBAssociativeArray peers;
-	if (!CBInitAssociativeArray(&peers, CBKeyCompare, CBReleaseObject))
+	if (!CBInitAssociativeArray(&peers, CBKeyCompare, free_peer))
 		fail("Could not create associative array for peers.\n");
 	
 	// Connect to initial peer
@@ -432,12 +448,13 @@ int main(int argc, char *argv[]){
 		init_peer->getAddresses = false;
 		send_version(init_peer);
 		
+		CBReleaseObject(ip);
 		// Add initial peer to list of peers
 		if (!add_peer(&peers, init_peer))
 			prt("Could not insert first peer.\n");
 	}
 	
-	struct pollfd fds[200];
+	struct pollfd fds[200]; // TODO heap
 	int nfds = 0, current_size;
 	int new_sd = 0;
 	int rv;
