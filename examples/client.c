@@ -15,8 +15,11 @@
 #include <string.h>
 
 #include <CBAssociativeArray.h>
+#include <CBBlock.h>
 #include <CBByteArray.h>
+#include <CBChainDescriptor.h>
 #include <CBConstants.h>
+#include <CBGetBlocks.h>
 #include <CBMessage.h>
 #include <CBNetworkAddress.h>
 #include <CBPeer.h>
@@ -48,7 +51,7 @@ typedef enum{
 } CBMessageHeaderOffsets;
 
 typedef enum{
-	DEFAULT, PING, PEERS, QUIT, VERSION
+	DEFAULT, PING, GETBLOCKS, PEERS, QUIT, VERSION
 } commands;
 
 void help(){
@@ -79,6 +82,12 @@ static void deb_hex(CBByteArray *str) {
 	deb("\n");
 }
 
+static void deb_hex2(uint8_t *ptr, int len) {
+	int i = 0;
+	for (; i < len; i++) deb("%02x", ptr[i]);
+	deb("\n");
+}
+
 static void prt_ip(CBByteArray *str) {
 	char *buffer = malloc(str->length * sizeof(char));
 	uint8_t *ptr = str->sharedData->data + str->offset;
@@ -99,6 +108,8 @@ int command(){
 	// Main interactive command dispatch
 	if (!strcmp(cmd, "help")) {
 		help();
+	} else if (!strcmp(cmd, "blocks")) {
+		rv = GETBLOCKS;
 	} else if (!strcmp(cmd, "ping")) {
 		prt("Ping! :(\n");
 		rv = PING;
@@ -200,6 +211,13 @@ bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
 	return true;
 }
 
+void free_peer(void *p){
+	CBPeer *peer = (CBPeer *)p;
+	if (peer->versionMessage)
+		CBFreeVersion(peer->versionMessage);
+	CBReleaseObject(peer);
+}
+
 void send_verack(CBPeer *peer){
 	if (!peer->versionSent)
 		return;
@@ -290,6 +308,7 @@ void send_version(CBPeer *peer){
 		deb("checksum: %x\n", *((uint32_t *) message->checksum));
 		deb_hex(message->bytes);
 		rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
+		// TODO more robust send: partial message handling
 	    if (rv < 0) {
     		perror("send()");
     		return;
@@ -303,60 +322,145 @@ void send_version(CBPeer *peer){
 	CBFreeByteArray(ua);
 }
 
-bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
+void send_getblocks(CBPeer *peer){
+	prt("Get blocks: ");
+	prt_ip(peer->versionMessage->addSource->ip);
+	prt("\n");
+	int sd = peer->socketID;
+	
+	CBBlock *genesis = CBNewBlock();
+	if (!CBInitBlockGenesisUMDNet(genesis))
+		fail("Failed genesis\n");
+	
+	uint8_t *rawhash = CBBlockGetHash(genesis);
+	CBChainDescriptor *chain = CBNewChainDescriptor();
+	CBByteArray *stophash = CBNewByteArrayWithDataCopy(rawhash, 32);
+	if (!CBChainDescriptorAddHash(chain, stophash))
+		fail("Failed to add hash to chain descriptor\n");
+	
+	int32_t vers = 70001;
+	CBGetBlocks *getblocks = CBNewGetBlocks(vers, chain, stophash);
+    CBMessage *message = CBGetMessage(getblocks);
+
+    /* Compute length, serialized, and checksum */
+    uint32_t len = CBGetBlocksCalculateLength(getblocks);
+    message->bytes = CBNewByteArrayOfSize(len);
+    len = CBGetBlocksSerialise(getblocks, false);
+    if (message->bytes) {
+        uint8_t hash[32];
+        uint8_t hash2[32];
+        CBSha256(CBByteArrayGetData(message->bytes), message->bytes->length, hash);
+        CBSha256(hash, 32, hash2);
+        message->checksum[0] = hash2[0];
+        message->checksum[1] = hash2[1];
+        message->checksum[2] = hash2[2];
+        message->checksum[3] = hash2[3];
+    }
+    
+    char header[24];
+    memcpy(header + CB_MESSAGE_HEADER_TYPE, "getblocks\0\0\0", 12);
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
+    CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, message->bytes->length);
+    memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
+    
+	deb("message len: %d\n", message->bytes->length);
+	deb("checksum: %x\n", *((uint32_t *) message->checksum));
+	deb_hex(message->bytes);
+	
+	send(sd, header, 24, 0);
+	send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
+	
+	CBFreeBlock(genesis);
+	CBReleaseObject(chain);
+	CBReleaseObject(stophash);
+	CBFreeGetBlocks(getblocks);
+}
+
+ssize_t recv_buffer(int sd, uint8_t **buffer, uint32_t length){
+	if (length == 0)
+		return 0;
+	
+	uint32_t len = length;
+	ssize_t nread = 0;
+	bool reading = true;
+	
+	*buffer = malloc(length);
+	uint8_t *ptr = *buffer;
+	
+	while (reading) {
+		nread = recv(sd, ptr, len, 0);
+		if (nread <= 0) {
+			if (errno == EWOULDBLOCK || errno == EAGAIN)
+				continue;
+			else
+				return nread;
+		}
+		deb("recv: %d/%d\n", nread, len);
+		if (nread < len) {
+			ptr += nread;
+			len -= nread;
+		} else if (nread == len) {
+			reading = false;
+		}
+	}
+	
+	return length;
+}
+
+ssize_t recv_message(int sd, uint8_t **header, uint8_t **payload){
+	// Return -1 on error, 0 on closed connection, message length on success
+	
+	ssize_t h_len = recv_buffer(sd, header, 24);
+	if (h_len != 24) return h_len;
+	deb("received header\n");
+
+	ssize_t p_len = *((uint32_t *)(*header + CB_MESSAGE_HEADER_LENGTH));
+	if (p_len == 0) return h_len;
+	
+	ssize_t len = recv_buffer(sd, payload, p_len);
+	if (len != p_len) return len;
+	deb("received payload: %d bytes\n", p_len);
+	
+	if (*((uint32_t *)(*header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
+		deb("wrong netmagic\n");
+		return -1;
+	}
+	
+	return h_len + p_len;
+}
+
+bool parse_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	// Return false to close current socket and remove peer
 	bool new_peer = !peer;
 	
 	char end[] = "==>\n\n";
 	deb("<== ");
 	deb(new_peer ? "new peer at %d\n" : "old peer at %d\n", sd);
-	
-	// Read the header
-	char header[24];
-	socklen_t nread = 0;
-	nread = recv(sd, header, 24, 0);
-	if (nread < 0) {
-		if (errno != EWOULDBLOCK) {
-			// Unexpected error
-			perror("recv() failed");
-			return false;
-		}
-	} else if (nread == 0) {
-		deb("closed connection\n");
-		return false;
-	}
-	
-	deb("received header\n");
-	if (*((uint32_t *)(header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
-		deb("wrong netmagic\n%s", end);
+
+	uint8_t *header_p;
+	uint8_t *payload;
+	ssize_t length = recv_message(sd, &header_p, &payload);
+		
+	if (length == -1)
 		return !new_peer; // if new peer, close socket
+	if (length == 0)
+		return false; // closed connection
+
+	if (new_peer || !peer->versionMessage)
+		prt("Incoming message: %u bytes\n", length);
+	else {
+		prt("Incoming message from ");
+		prt_ip(peer->versionMessage->addSource->ip);
+		prt(": %u bytes\n", length);
 	}
 	
-	// Read the payload
-	unsigned int length = *((uint32_t *)(header + CB_MESSAGE_HEADER_LENGTH));
-	uint8_t *payload = (uint8_t *) malloc(length);
-	nread = 0;
-	if (length) nread = recv(sd, payload, length, 0);
-	if (nread != length) {
-		deb("incomplete read %u %u \n%s", nread, length, end);
-		if (new_peer)
-			return false;
-	} else {
-		if (new_peer || !peer->versionMessage)
-			prt("Incoming message: %u bytes\n", nread);
-		else {
-			prt("Incoming message from ");
-			prt_ip(peer->versionMessage->addSource->ip);
-			prt(": %u bytes\n", nread);
-		}
-	}
-	
+	char *header = (char *) header_p;
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
 		deb("received version header\n");
-		CBByteArray *versionBytes = CBNewByteArrayWithDataCopy(payload, length);
+		CBByteArray *versionBytes = CBNewByteArrayWithDataCopy(payload, length - 24);
 		CBVersion *version = CBNewVersionFromData(versionBytes);
 		CBVersionDeserialise(version);
-		//prt_ip(version->addRecv->ip); prt("\n");
+		prt_ip(version->addRecv->ip); prt("\n");
 		if (new_peer) {
 			// Parse network address and make this connection a peer
 			prt("Correct version message received. New peer at ");
@@ -407,16 +511,10 @@ bool read_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	deb("%s", end);
 	
     // Clean up
-    free(payload);
+	free(header_p);
+	if (length > 24) free(payload);
     
 	return true;
-}
-
-void free_peer(void *p){
-	CBPeer *peer = (CBPeer *)p;
-	if (peer->versionMessage)
-		CBFreeVersion(peer->versionMessage);
-	CBReleaseObject(peer);
 }
 
 int main(int argc, char *argv[]){
@@ -454,7 +552,7 @@ int main(int argc, char *argv[]){
 			prt("Could not insert first peer.\n");
 	}
 	
-	struct pollfd fds[200]; // TODO heap
+	struct pollfd fds[200]; // TODO heap, expand array if necessary
 	int nfds = 0, current_size;
 	int new_sd = 0;
 	int rv;
@@ -524,6 +622,9 @@ int main(int argc, char *argv[]){
 				// User input
 				int rv = command();
 				switch (rv) {
+				case GETBLOCKS:
+					send_getblocks(init_peer);
+					break;
 				case PEERS:
 					prt("Peers: %d\n\n", peers.root->numElements);
 					break;
@@ -581,7 +682,7 @@ int main(int argc, char *argv[]){
 				
 				if (!found) peer = NULL;
 				
-				bool success = read_message(fds[i].fd, peer, &peers);
+				bool success = parse_message(fds[i].fd, peer, &peers);
 				if (!success) {
 					deb("Closing %d\n", fds[i].fd);
 					close(fds[i].fd);
