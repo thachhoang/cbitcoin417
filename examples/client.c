@@ -36,6 +36,7 @@ void deb(const char *, ...);	// printf only in debug mode
 //#define NETMAGIC 0x0709110B // testnet
 #define NETMAGIC 0xd0b4bef9 // umdnet
 
+//#define DEFAULT_IP      (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}
 #define DEFAULT_IP      (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 128, 8, 126, 25} // local satoshi: kale.cs.umd.edu
 #define DEFAULT_PORT    28333
 #define SELF_IP         (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}
@@ -347,7 +348,7 @@ void send_version(CBPeer *peer){
 	deb("Checksum: %x\n", *((uint32_t *) message->checksum));
 	deb_hex(message->bytes);
 
-	int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+	int rv = send_message(sd, (uint8_t *)header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
 	if (rv == message->bytes->length + 24) {
 		deb("send succeeds\n");
 		peer->versionSent = true;
@@ -404,7 +405,7 @@ void send_getblocks(CBPeer *peer){
 	deb("checksum: %x\n", *((uint32_t *) message->checksum));
 	deb_hex(message->bytes);
 	
-	int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+	int rv = send_message(sd, (uint8_t *)header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
 	if (rv == message->bytes->length + 24) {
 		deb("send succeeds\n");
 	}
@@ -667,7 +668,10 @@ int main(int argc, char *argv[]){
 				int rv = command();
 				switch (rv) {
 				case GETBLOCKS:
-					send_getblocks(init_peer);
+					if (init_peer)
+						send_getblocks(init_peer);
+					else
+						prt("Initial peer is not available.\n\n");
 					break;
 				case PEERS:
 					prt("Peers: %d\n\n", peers.root->numElements);
@@ -732,6 +736,8 @@ int main(int argc, char *argv[]){
 					close(fds[i].fd);
 					fds[i].fd = -1;
 					compress_array = true;
+					if (peer == init_peer)
+						init_peer = NULL;
 					if (peer)
 						CBAssociativeArrayDelete(&peers, CBAssociativeArrayFind(&peers, peer).position, true);
 				}
