@@ -204,6 +204,8 @@ int connect_peer(uint8_t* arr, in_port_t port){
 }
 
 bool add_peer(CBAssociativeArray *peers, CBPeer *peer){
+	if (!peer || !peers)
+		return false;
 	if (NOT CBAssociativeArrayInsert(peers, peer, CBAssociativeArrayFind(peers, peer).position, NULL)){
 		deb("Could not insert a peer into the peers array.\n");
 		return false;
@@ -216,6 +218,59 @@ void free_peer(void *p){
 	if (peer->versionMessage)
 		CBFreeVersion(peer->versionMessage);
 	CBReleaseObject(peer);
+}
+
+ssize_t send_buffer(int sd, uint8_t *buffer, uint32_t length){
+	if (length == 0)
+		return 0;
+	
+	uint32_t len = length;
+	ssize_t nsent = 0;
+	bool sending = true;
+	uint8_t *ptr = buffer;
+	
+	while (sending) {
+		nsent = send(sd, ptr, len, 0);
+		if (nsent < 0) {
+			if (errno == EWOULDBLOCK || errno == EAGAIN)
+				continue;
+			else
+				return nsent;
+		}
+		deb("send: %d/%d\n", nsent, len);
+		if (nsent == 0) return 0;
+		if (nsent < len) {
+			ptr += nsent;
+			len -= nsent;
+		} else if (nsent == len) {
+			sending = false;
+		}
+	}
+	
+	return length;
+}
+
+ssize_t send_message(int sd, uint8_t *header, uint8_t *payload, ssize_t length){
+	// Return -1 on error, 0 on closed connection, message length on success
+	
+	ssize_t h_len = send_buffer(sd, header, 24);
+	if (h_len != 24) {
+		deb("send header failed: %d/24\n", h_len);
+		return (h_len <= 0) ? h_len : -1;
+	}
+	deb("sent header\n");
+
+	ssize_t p_len = length - 24;
+	if (p_len == 0 || !payload) return h_len; // verack and others without payload
+	
+	ssize_t len = send_buffer(sd, payload, p_len);
+	if (len != p_len) {
+		deb("send payload failed: %d/%d\n", len, p_len);
+		return (len <= 0) ? len : -1;
+	}
+	deb("sent payload: %d bytes\n", p_len);
+	
+	return h_len + p_len;
 }
 
 void send_verack(CBPeer *peer){
@@ -244,10 +299,10 @@ void send_verack(CBPeer *peer){
 	checksum[3] = hash2[3];
     memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, checksum, 4);
     
-	int rv = send(sd, header, 24, 0);
-	if (rv < 0) {
-		perror("send()");
-		return;
+	int rv = send_message(sd, (uint8_t *)header, NULL, 24);
+	if (rv == 24) {
+		deb("send succeeds\n");
+		peer->versionAck = true;
 	}
 	
 	//deb_hex(CBNewByteArrayWithDataCopy((uint8_t *)header, 24));
@@ -288,34 +343,16 @@ void send_version(CBPeer *peer){
     // Checksum
     memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, message->checksum, 4);
 
-    // Send the header
-    int rv = send(sd, header, 24, 0);
-    if (rv < 0) {
-    	perror("send()");
-    	return;
-    }
-    
-    // Send the message
-    if (peer->versionSent) {
-		prt("A version message has already been sent to this peer (");
-		prt_ip(peer->versionMessage->addSource->ip);
-		prt("). It will not respond. Here's what we would've sent.\n");
-		prt("Message length: %d\n", message->bytes->length);
-		prt("Checksum: %x\n", *((uint32_t *) message->checksum));
-		prt_hex(message->bytes);
-    } else {
-		deb("message len: %d\n", message->bytes->length);
-		deb("checksum: %x\n", *((uint32_t *) message->checksum));
-		deb_hex(message->bytes);
-		rv = send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
-		// TODO more robust send: partial message handling
-	    if (rv < 0) {
-    		perror("send()");
-    		return;
-    	}
-    }
-    
-	peer->versionSent = true;
+	deb("Message length: %d\n", message->bytes->length);
+	deb("Checksum: %x\n", *((uint32_t *) message->checksum));
+	deb_hex(message->bytes);
+
+	int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+	if (rv == message->bytes->length + 24) {
+		deb("send succeeds\n");
+		peer->versionSent = true;
+	}
+	
 	CBFreeVersion(version);
 	CBFreeNetworkAddress(sourceAddr);
 	CBFreeByteArray(ip);
@@ -367,9 +404,11 @@ void send_getblocks(CBPeer *peer){
 	deb("checksum: %x\n", *((uint32_t *) message->checksum));
 	deb_hex(message->bytes);
 	
-	send(sd, header, 24, 0);
-	send(sd, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length, 0);
-	
+	int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+	if (rv == message->bytes->length + 24) {
+		deb("send succeeds\n");
+	}
+		
 	CBFreeBlock(genesis);
 	CBReleaseObject(chain);
 	CBReleaseObject(stophash);
@@ -389,12 +428,13 @@ ssize_t recv_buffer(int sd, uint8_t **buffer, uint32_t length){
 	
 	while (reading) {
 		nread = recv(sd, ptr, len, 0);
-		if (nread <= 0) {
+		if (nread < 0) {
 			if (errno == EWOULDBLOCK || errno == EAGAIN)
 				continue;
 			else
 				return nread;
 		}
+		if (nread == 0) return 0;
 		deb("recv: %d/%d\n", nread, len);
 		if (nread < len) {
 			ptr += nread;
@@ -411,18 +451,27 @@ ssize_t recv_message(int sd, uint8_t **header, uint8_t **payload){
 	// Return -1 on error, 0 on closed connection, message length on success
 	
 	ssize_t h_len = recv_buffer(sd, header, 24);
-	if (h_len != 24) return h_len;
+	if (h_len != 24) {
+		free(*header);
+		return (h_len <= 0) ? h_len : -1;
+	}
 	deb("received header\n");
 
 	ssize_t p_len = *((uint32_t *)(*header + CB_MESSAGE_HEADER_LENGTH));
-	if (p_len == 0) return h_len;
+	if (p_len == 0) return h_len; // verack and others without payload
 	
 	ssize_t len = recv_buffer(sd, payload, p_len);
-	if (len != p_len) return len;
+	if (len != p_len) {
+		free(*header);
+		free(*payload);
+		return (len <= 0) ? len : -1;
+	}
 	deb("received payload: %d bytes\n", p_len);
 	
 	if (*((uint32_t *)(*header + CB_MESSAGE_HEADER_NETWORK_ID)) != NETMAGIC) {
 		deb("wrong netmagic\n");
+		free(*header);
+		free(*payload);
 		return -1;
 	}
 	
@@ -467,11 +516,9 @@ bool parse_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 			prt_ip(version->addSource->ip);
 			prt(":%d.\n", version->addSource->port);
 			
-			peer = CBNewPeerByTakingNetworkAddress(version->addSource);
+			CBNetworkAddress *addr = version->addSource;
+			peer = CBNewPeerByTakingNetworkAddress(CBNewNetworkAddress(addr->lastSeen, addr->ip, addr->port, addr->services, addr->isPublic));
 			peer->socketID = sd;
-			peer->versionSent = false;
-			peer->versionAck = false;
-			peer->getAddresses = false;
 			
 			// A new peer is created following a version exchange.
 			if (!add_peer(peers, peer))
@@ -541,9 +588,6 @@ int main(int argc, char *argv[]){
 		CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
-		init_peer->versionSent = false;
-		init_peer->versionAck = false;
-		init_peer->getAddresses = false;
 		send_version(init_peer);
 		
 		CBReleaseObject(ip);
