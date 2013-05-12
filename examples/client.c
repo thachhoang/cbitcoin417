@@ -692,7 +692,7 @@ int main(int argc, char *argv[]){
 	}
 	
 	// The last time we pinged all the peers
-	time_t now, last_ping = time(NULL);
+	time_t now, diff = 0, last_ping = time(NULL);
 	
 	while (running) {
 		peer = NULL;
@@ -702,6 +702,9 @@ int main(int argc, char *argv[]){
 		if (now - last_ping >= PING_INTERVAL) {
 			prt("PING!!! (after %d sec)\n\n", now - last_ping);
 			last_ping = now;
+			diff = 0;
+			// TODO pinging code is noisy; remove on submission
+			/*
 			if (CBAssociativeArrayGetFirst(&peers, &it)) {
 				do {
 					peer = it.node->elements[it.index];
@@ -714,9 +717,14 @@ int main(int argc, char *argv[]){
 						send_ping(peer);
 				} while (!CBAssociativeArrayIterate(&peers, &it));
 			}
+			*/
+		} else {
+			diff = now - last_ping;
+			//deb("diff: %d, poll: %d\n", diff, poll_timeout/1000 - diff);
 		}
 		
-		rv = poll(fds, nfds, poll_timeout);
+		// Poll only until the next ping
+		rv = poll(fds, nfds, poll_timeout - diff * 1000);
 		if (rv < 0) {
 			perror("poll()");
 			break;

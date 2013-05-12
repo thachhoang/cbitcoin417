@@ -9,11 +9,11 @@ Done:
 - At the start, actively connect to initial peers (kale.cs.umd.edu)
 - Accept incoming connections, create new sockets and save new peers in corresponding peer objects
 - Version exchange
+- Ping/pong timer (60 seconds)
 
 Pending:
 
 - Send a get-address message to each peer (once), then try to connect to the results
-- Ping/pong timer (60 seconds)
 
 ## References
 
