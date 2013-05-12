@@ -42,8 +42,8 @@ void deb(const char *, ...);	// printf only in debug mode
 #define SELF_IP         (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}
 #define SELF_PORT       28333
 
-#define MAX_PENDING 20		// backlog size for listen()
-
+#define MAX_PENDING 20    // backlog size for listen()
+#define PING_INTERVAL 60  // ping peers every 60 seconds
 typedef enum{
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
 	CB_MESSAGE_HEADER_TYPE = 4,			// The 12 character string for the message type

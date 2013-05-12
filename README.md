@@ -7,17 +7,19 @@ Done:
 - Use select() in a loop to monitor everything
 - Peer objects are collected in CBAssociativeArray
 - At the start, actively connect to initial peers (kale.cs.umd.edu)
-- Accept incoming connections, create new sockets and save them in corresponding peer objects
+- Accept incoming connections, create new sockets and save new peers in corresponding peer objects
+- Version exchange
 
 Pending:
 
-- Send a get-address message to each peer (once?), then try to connect to the results
-- Ping/pong (new thread? CBAssociativeArray is not thread-safe)
+- Send a get-address message to each peer (once), then try to connect to the results
+- Ping/pong timer (60 seconds)
 
 ## References
 
 - poll() code from [IBM](http://pic.dhe.ibm.com/infocenter/iseries/v6r1m0/index.jsp?topic=/rzab6/poll.htm)
 - [cbitcoin](https://github.com/MatthewLM/cbitcoin)
+- [ping/pong specs](https://en.bitcoin.it/wiki/BIP_0031)
 
 ## Notes
 
