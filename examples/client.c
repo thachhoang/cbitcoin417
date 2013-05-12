@@ -44,6 +44,7 @@ void deb(const char *, ...);	// printf only in debug mode
 
 #define MAX_PENDING 20    // backlog size for listen()
 #define PING_INTERVAL 60  // ping peers every 60 seconds
+
 typedef enum{
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
 	CB_MESSAGE_HEADER_TYPE = 4,			// The 12 character string for the message type
@@ -81,6 +82,12 @@ static void deb_hex(CBByteArray *str) {
 	uint8_t *ptr = str->sharedData->data;
 	for (; i < str->length; i++) deb("%02x", ptr[str->offset + i]);
 	deb("\n");
+}
+
+static void prt_hex2(uint8_t *ptr, int len) {
+	int i = 0;
+	for (; i < len; i++) prt("%02x", ptr[i]);
+	prt("\n");
 }
 
 static void deb_hex2(uint8_t *ptr, int len) {
@@ -272,23 +279,13 @@ ssize_t send_message(int sd, uint8_t *header, uint8_t *payload, ssize_t length){
 	return h_len + p_len;
 }
 
-void send_ping(CBPeer *peer){
-	uint64_t ui64 = ((uint64_t) rand() << 32) | rand();
-	send_pingpong(peer, ui64, true);
-}
-
-void send_pong(CBPeer *peer, uint64_t nonce){
-	send_pingpong(peer, nonce, false);
-}
-
 void send_pingpong(CBPeer *peer, uint64_t nonce, bool ping){
-	prt(ping ? "Ping: " : "Pong: ");
+	prt(ping ? "Ping " : "Pong ");
 	prt_ip(peer->versionMessage->addSource->ip);
-	prt("\n");
 	
 	int sd = peer->socketID;
 	
-	deb("Nonce: "); deb_hex2((uint8_t *) &nonce, 8);
+	prt(", nonce: "); prt_hex2((uint8_t *) &nonce, 8); prt("\n");
 	CBByteArray *bytes = CBNewByteArrayOfSize(8);
 	CBByteArraySetInt64(bytes, 0, nonce);
 	
@@ -315,6 +312,15 @@ void send_pingpong(CBPeer *peer, uint64_t nonce, bool ping){
 	}
 
 	CBFreeByteArray(bytes);
+}
+
+void send_ping(CBPeer *peer){
+	uint64_t ui64 = ((uint64_t) rand() << 32) | rand();
+	send_pingpong(peer, ui64, true);
+}
+
+void send_pong(CBPeer *peer, uint64_t nonce){
+	send_pingpong(peer, nonce, false);
 }
 
 void send_verack(CBPeer *peer){
@@ -562,6 +568,7 @@ bool parse_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 			CBNetworkAddress *addr = version->addSource;
 			peer = CBNewPeerByTakingNetworkAddress(CBNewNetworkAddress(addr->lastSeen, addr->ip, addr->port, addr->services, addr->isPublic));
 			peer->socketID = sd;
+			peer->connectionWorking = true;
 			
 			// A new peer is created following a version exchange.
 			if (!add_peer(peers, peer))
@@ -643,6 +650,7 @@ int main(int argc, char *argv[]){
 		CBNetworkAddress *peeraddr = CBNewNetworkAddress(0, ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
 		init_peer = CBNewPeerByTakingNetworkAddress(peeraddr);
 		init_peer->socketID = first_peer_sd;
+		init_peer->connectionWorking = true;
 		send_version(init_peer);
 		
 		CBReleaseObject(ip);
@@ -651,16 +659,16 @@ int main(int argc, char *argv[]){
 			prt("Could not insert first peer.\n");
 	}
 	
-	struct pollfd fds[200]; // TODO heap, expand array if necessary
 	int nfds = 0, current_size;
 	int new_sd = 0;
 	int rv;
-	int timeout = 60 * 1000; // 1 minute
+	int poll_timeout = PING_INTERVAL * 1000;
 	int i, j;
 	bool running = true, compress_array = false;
 	CBPosition it;
 	CBPeer *peer = NULL;
-
+	
+	struct pollfd fds[200]; // TODO heap, expand array if necessary
 	memset(fds, 0 , sizeof(fds));
 	
 	// Watch initial listening socket
@@ -683,18 +691,32 @@ int main(int argc, char *argv[]){
 		} while (!CBAssociativeArrayIterate(&peers, &it));
 	}
 	
+	// The last time we pinged all the peers
+	time_t now, last_ping = time(NULL);
+	
 	while (running) {
-		// Outgoing messages
 		peer = NULL;
-		/*
-		if (CBAssociativeArrayGetFirst(&peers, &it)) {
-			do {
-				peer = it.node->elements[it.index];
-			} while (!CBAssociativeArrayIterate(&peers, &it));
-		}
-		*/
 		
-		rv = poll(fds, nfds, timeout);
+		// Ping all peers
+		now = time(NULL);
+		if (now - last_ping >= PING_INTERVAL) {
+			prt("PING!!! (after %d sec)\n\n", now - last_ping);
+			last_ping = now;
+			if (CBAssociativeArrayGetFirst(&peers, &it)) {
+				do {
+					peer = it.node->elements[it.index];
+					if (peer->connectionWorking) {
+						peer->connectionWorking = false;
+					} else {
+						deb("peer at socket %d is silent since last ping.\n", peer->socketID);
+					}
+					if (peer->versionAck)
+						send_ping(peer);
+				} while (!CBAssociativeArrayIterate(&peers, &it));
+			}
+		}
+		
+		rv = poll(fds, nfds, poll_timeout);
 		if (rv < 0) {
 			perror("poll()");
 			break;
