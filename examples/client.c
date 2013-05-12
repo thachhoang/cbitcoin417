@@ -61,7 +61,7 @@ void help(){
 	prt("    quit : quits\n");
 	prt("    version : sends version message to initial peer\n");
 	prt("    peers : returns the number of connected peers\n");
-	prt("    ping : sends ping message to connected client\n");
+	prt("    ping : sends ping message to initial peer\n");
 	prt("\n");
 }
 
@@ -112,14 +112,12 @@ int command(){
 	} else if (!strcmp(cmd, "blocks")) {
 		rv = GETBLOCKS;
 	} else if (!strcmp(cmd, "ping")) {
-		prt("Ping! :(\n");
 		rv = PING;
 	} else if (!strcmp(cmd, "peers")) {
 		rv = PEERS;
 	} else if (!strcmp(cmd, "version")) {
 		rv = VERSION;
 	} else if (!strcmp(cmd, "quit") || !strcmp(cmd, "q")) {
-		prt("Quitting...\n");
 		rv = QUIT; // party's over
 	} else if (!strcmp(cmd, "")) {
 	} else {
@@ -274,6 +272,51 @@ ssize_t send_message(int sd, uint8_t *header, uint8_t *payload, ssize_t length){
 	return h_len + p_len;
 }
 
+void send_ping(CBPeer *peer){
+	uint64_t ui64 = ((uint64_t) rand() << 32) | rand();
+	send_pingpong(peer, ui64, true);
+}
+
+void send_pong(CBPeer *peer, uint64_t nonce){
+	send_pingpong(peer, nonce, false);
+}
+
+void send_pingpong(CBPeer *peer, uint64_t nonce, bool ping){
+	prt(ping ? "Ping: " : "Pong: ");
+	prt_ip(peer->versionMessage->addSource->ip);
+	prt("\n");
+	
+	int sd = peer->socketID;
+	
+	deb("Nonce: "); deb_hex2((uint8_t *) &nonce, 8);
+	CBByteArray *bytes = CBNewByteArrayOfSize(8);
+	CBByteArraySetInt64(bytes, 0, nonce);
+	
+	uint8_t hash[32];
+	uint8_t hash2[32];
+	uint8_t checksum[4];
+	
+	CBSha256(CBByteArrayGetData(bytes), bytes->length, hash);
+	CBSha256(hash, 32, hash2);
+	checksum[0] = hash2[0];
+	checksum[1] = hash2[1];
+	checksum[2] = hash2[2];
+	checksum[3] = hash2[3];
+	
+	char header[24];
+	memcpy(header + CB_MESSAGE_HEADER_CHECKSUM, checksum, 4);
+	memcpy(header + CB_MESSAGE_HEADER_TYPE, ping ? "ping\0\0\0\0\0\0\0\0" : "pong\0\0\0\0\0\0\0\0", 12);
+	CBInt32ToArray(header, CB_MESSAGE_HEADER_NETWORK_ID, NETMAGIC);
+	CBInt32ToArray(header, CB_MESSAGE_HEADER_LENGTH, bytes->length);
+
+	int rv = send_message(sd, (uint8_t *)header, bytes->sharedData->data, bytes->length + 24);
+	if (rv == 32) {
+		deb("send succeeds\n");
+	}
+
+	CBFreeByteArray(bytes);
+}
+
 void send_verack(CBPeer *peer){
 	if (!peer->versionSent)
 		return;
@@ -306,7 +349,6 @@ void send_verack(CBPeer *peer){
 		peer->versionAck = true;
 	}
 	
-	//deb_hex(CBNewByteArrayWithDataCopy((uint8_t *)header, 24));
 	CBFreeByteArray(empty);
 }
 
@@ -545,9 +587,21 @@ bool parse_message(int sd, CBPeer *peer, CBAssociativeArray *peers){
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
 		deb("received ping header\n");
+		CBByteArray *bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
+		uint64_t nonce = CBByteArrayReadInt64(bytes, 0);
+		deb("Nonce: "); deb_hex2((uint8_t *) &nonce, 8);
+		CBFreeByteArray(bytes);
+		
+		send_pong(peer, nonce);
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
 		deb("received pong header\n");
+		CBByteArray *bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
+		uint64_t nonce = CBByteArrayReadInt64(bytes, 0);
+		deb("Nonce: "); deb_hex2((uint8_t *) &nonce, 8);
+		CBFreeByteArray(bytes);
+		
+		peer->connectionWorking = true;
 	}
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		deb("received inv header\n");
@@ -668,22 +722,23 @@ int main(int argc, char *argv[]){
 				int rv = command();
 				switch (rv) {
 				case GETBLOCKS:
-					if (init_peer)
-						send_getblocks(init_peer);
-					else
-						prt("Initial peer is not available.\n\n");
+					if (init_peer) send_getblocks(init_peer);
+					else prt("Initial peer is not available.\n\n");
 					break;
 				case PEERS:
 					prt("Peers: %d\n\n", peers.root->numElements);
 					break;
+				case PING:
+					if (init_peer) send_ping(init_peer);
+					else prt("Initial peer is not available.\n\n");
+					break;
 				case QUIT:
+					prt("Quitting...\n");
 					running = false;
 					break;
 				case VERSION:
-					if (init_peer)
-						send_version(init_peer);
-					else
-						prt("Initial peer is not available.\n\n");
+					if (init_peer) send_version(init_peer);
+					else prt("Initial peer is not available.\n\n");
 					break;
 				case DEFAULT:
 				default:
