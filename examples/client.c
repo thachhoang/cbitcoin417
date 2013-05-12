@@ -720,11 +720,15 @@ int main(int argc, char *argv[]){
 			*/
 		} else {
 			diff = now - last_ping;
-			//deb("diff: %d, poll: %d\n", diff, poll_timeout/1000 - diff);
+			//deb("diff: %d, poll: %d\n", diff, PING_INTERVAL - diff);
 		}
 		
 		// Poll only until the next ping
-		rv = poll(fds, nfds, poll_timeout - diff * 1000);
+		poll_timeout = (PING_INTERVAL - diff) * 1000;
+		if (poll_timeout < 0)
+			poll_timeout = 0;
+		
+		rv = poll(fds, nfds, poll_timeout);
 		if (rv < 0) {
 			perror("poll()");
 			break;
