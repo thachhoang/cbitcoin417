@@ -45,8 +45,9 @@ void deb(const char *, ...);  // printf only in debug mode
 #define SELF_IP         (uint8_t [16]) {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 127, 0, 0, 1}
 #define SELF_PORT       28333
 
-#define MAX_PENDING 20    // backlog size for listen()
-#define PING_INTERVAL 60  // ping peers every 60 seconds
+#define MAX_INV       500  // max number of hashes in inv
+#define MAX_PENDING    20  // backlog size for listen()
+#define PING_INTERVAL  60  // ping peers every 60 seconds
 
 typedef enum {
 	CB_MESSAGE_HEADER_NETWORK_ID = 0,	// The network identidier bytes
@@ -306,7 +307,7 @@ void make_header(uint8_t **header, CBMessage *message, char *header_type){
 }
 
 void send_pingpong(CBPeer *peer, uint64_t nonce, bool ping){
-	prt(ping ? "Ping " : "Pong ");
+	prt(">> Sending %s: ", ping ? "ping" : "pong");
 	prt_ip(peer->versionMessage->addSource->ip);
 
 	int sd = peer->socketID;
@@ -404,7 +405,7 @@ void send_version(CBPeer *peer){
 }
 
 void send_getblocks(CBPeer *peer){
-	prt("Get blocks: ");
+	prt(">> Sending getblocks: ");
 	prt_ip(peer->versionMessage->addSource->ip);
 	prt("\n");
 	int sd = peer->socketID;
@@ -444,7 +445,7 @@ void send_getblocks(CBPeer *peer){
 }
 
 void send_getdata(CBPeer *peer, CBInventoryBroadcast *inv){
-	prt("Get data: "); prt_ip(peer->versionMessage->addSource->ip); prt("\n");
+	prt(">> Sending getdata: "); prt_ip(peer->versionMessage->addSource->ip); prt("\n");
 	int sd = peer->socketID;
 
 	deb("inv count: %d\n", inv->itemNum);
@@ -499,6 +500,90 @@ void send_getdata(CBPeer *peer, CBInventoryBroadcast *inv){
 
 	free(header);
 	CBFreeInventoryBroadcast(getdata);
+}
+
+void send_inv(CBPeer *peer, CBGetBlocks *gb){
+	prt(">> Sending inv to: "); prt_ip(peer->versionMessage->addSource->ip); prt("\n");
+	int sd = peer->socketID;
+
+	CBByteArray *stop_hash_ba = gb->stopAtHash;
+	CBByteArray *start_hash_ba = gb->chainDescriptor->hashes[0];
+	uint8_t *stop_hash = stop_hash_ba->sharedData->data + stop_hash_ba->offset;
+	uint8_t *start_hash = start_hash_ba->sharedData->data + start_hash_ba->offset;
+	uint8_t branch;
+	uint32_t start_index, stop_index, inv_count;
+	uint32_t last_index = validator->branches[validator->mainBranch].lastValidation;
+
+	// Start index
+	if (!CBBlockChainStorageGetBlockLocation(validator, start_hash, &branch, &start_index)) {
+		// We don't have the start block.
+		return;
+	}
+	if (branch != validator->mainBranch) {
+		// We're off the main branch. Just start from genesis.
+		start_index = 0;
+	}
+
+	// Stop index
+	if (!CBBlockChainStorageGetBlockLocation(validator, stop_hash, &branch, &stop_index) || stop_index <= start_index) {
+		// We don't have the stop block
+		stop_index = start_index + MAX_INV;
+	}
+	if (branch != validator->mainBranch) {
+		// We're off the main branch. Just stop 500 blocks after the start block.
+		stop_index = start_index + MAX_INV;
+	}
+	if (stop_index > last_index) {
+		// We only have blocks up to the last validated block on the main chain.
+		stop_index = last_index;
+	}
+
+	inv_count = stop_index - start_index;
+	deb("%d blocks from %d to %d\n", inv_count, start_index + 1, stop_index);
+
+	CBInventoryBroadcast *inv = CBNewInventoryBroadcast();
+	inv->items = malloc(inv_count * sizeof(CBInventoryItem));
+	if (inv->items == NULL)
+		sysfail("malloc() failed");
+
+	// Load hashes, build the inventory
+	uint16_t i, k = 0;
+	CBBlock *block;
+	CBByteArray *hash;
+	for (i = start_index + 1; i <= stop_index; i++) {
+		block = CBBlockChainStorageLoadBlock(validator, i, validator->mainBranch);
+		if (!block)
+			continue;
+		hash = CBNewByteArrayWithDataCopy(CBBlockGetHash(block), 32);
+		inv->items[k++] = CBNewInventoryItem(CB_INVENTORY_ITEM_BLOCK, hash);
+		CBReleaseObject(hash);
+		CBFreeBlock(block);
+	}
+
+	inv->itemNum = k;
+	if (k != inv_count) {
+		inv->items = realloc(inv->items, inv->itemNum * sizeof(CBInventoryItem));
+		if (inv->items == NULL)
+			sysfail("realloc() failed");
+	}
+
+	CBMessage *message = CBGetMessage(inv);
+	message->bytes = CBNewByteArrayOfSize(CBInventoryBroadcastCalculateLength(inv));
+	CBInventoryBroadcastSerialise(inv, false);
+
+	uint8_t *header;
+	if (message->bytes) {
+		make_header(&header, message, "inv\0\0\0\0\0\0\0\0\0");
+		deb("Message length: %d\n", message->bytes->length);
+		int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+		if (rv == message->bytes->length + 24) {
+			deb("send succeeds\n");
+		}
+	}
+
+	free(header);
+	CBFreeInventoryBroadcast(inv);
+	CBFreeGetBlocks(gb);
 }
 
 ssize_t recv_buffer(int sd, uint8_t **buffer, uint32_t length){
@@ -649,6 +734,13 @@ bool parse_message(int sd, CBPeer *peer){
 		peer->connectionWorking = true;
 	}
 	
+	// getblocks
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "getblocks\0\0\0", 12)) {
+		CBGetBlocks *gb = CBNewGetBlocksFromData(bytes);
+		CBGetBlocksDeserialise(gb);
+		send_inv(peer, gb);
+	}
+
 	// inv
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		CBInventoryBroadcast *inv = CBNewInventoryBroadcastFromData(bytes);
