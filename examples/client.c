@@ -444,6 +444,64 @@ void send_getblocks(CBPeer *peer){
 	CBFreeGetBlocks(getblocks);
 }
 
+void send_getdata(CBPeer *peer, CBInventoryBroadcast *inv){
+	prt("Get data: "); prt_ip(peer->versionMessage->addSource->ip); prt("\n");
+	int sd = peer->socketID;
+
+	deb("inv count: %d\n", inv->itemNum);
+	CBInventoryBroadcast *getdata = CBNewInventoryBroadcast();
+	getdata->items = malloc(inv->itemNum * sizeof(CBInventoryItem));
+	if (getdata->items == NULL)
+		sysfail("malloc() failed");
+
+	// Check if blocks exist in database, if not, add block hash to getdata
+	uint16_t i, k = 0, inv_count = inv->itemNum;// > 10 ? 10 : inv->itemNum;
+	uint8_t *hash;
+	CBInventoryItem *item;
+	for (i = 0; i < inv_count; i++) {
+		deb("Item %4d ", i);
+		item = inv->items[i];
+		if (item->type == CB_INVENTORY_ITEM_BLOCK) {
+			deb("[block ");
+			hash = item->hash->sharedData->data + item->hash->offset;
+			deb_hex(hash, 4); deb("]: ");
+			if (!CBBlockChainStorageBlockExists(validator, hash)) {
+				deb("DNE: add to getdata payload");
+				getdata->items[k++] = CBNewInventoryItem(item->type, item->hash);
+			}
+		} else if (item->type == CB_INVENTORY_ITEM_TRANSACTION) {
+			deb("[tx]");
+		} else if (item->type == CB_INVENTORY_ITEM_ERROR) {
+			deb("[err]");
+		}
+		deb("\n");
+	}
+
+	CBFreeInventoryBroadcast(inv);
+
+	getdata->itemNum = k;
+	getdata->items = realloc(getdata->items, getdata->itemNum * sizeof(CBInventoryItem));
+	if (getdata->items == NULL)
+		sysfail("realloc() failed");
+
+	CBMessage *message = CBGetMessage(getdata);
+	message->bytes = CBNewByteArrayOfSize(CBInventoryBroadcastCalculateLength(getdata));
+	CBInventoryBroadcastSerialise(getdata, false);
+
+	uint8_t *header;
+	if (message->bytes) {
+		make_header(&header, message, "getdata\0\0\0\0\0");
+		deb("Message length: %d\n", message->bytes->length);
+		int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+		if (rv == message->bytes->length + 24) {
+			deb("send succeeds\n");
+		}
+	}
+
+	free(header);
+	CBFreeInventoryBroadcast(getdata);
+}
+
 ssize_t recv_buffer(int sd, uint8_t **buffer, uint32_t length){
 	if (length == 0)
 		return 0;
@@ -596,72 +654,7 @@ bool parse_message(int sd, CBPeer *peer){
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
 		CBInventoryBroadcast *inv = CBNewInventoryBroadcastFromData(bytes);
 		CBInventoryBroadcastDeserialise(inv);
-
-		deb("inv count: %d\n", inv->itemNum);
-		CBInventoryBroadcast *getdata = CBNewInventoryBroadcast();
-		getdata->items = malloc(inv->itemNum * sizeof(CBInventoryItem));
-		if (getdata->items == NULL)
-			sysfail("malloc() failed");
-		
-		uint16_t i, k = 0, inv_count = inv->itemNum > 10 ? 10 : inv->itemNum;
-		CBInventoryItem *item;
-		for (i = 0; i < inv_count; i++) {
-			deb("Item %4d ", i);
-			item = inv->items[i];
-			if (item->type == CB_INVENTORY_ITEM_BLOCK) {
-				deb("[block ");
-				uint8_t *hash = item->hash->sharedData->data + item->hash->offset;
-				deb_hex(hash, 4); deb("]: ");
-				if (CBBlockChainStorageBlockExists(validator, hash)) {
-					deb("exists: ");
-					uint8_t branch;
-					uint32_t index;
-					if (CBBlockChainStorageGetBlockLocation(validator, hash, &branch, &index)) {
-						CBBlock * block = CBBlockChainStorageLoadBlock(validator, index, branch);
-						if (block) {
-							CBBlockDeserialise(block, true);
-							deb("%d", (uint8_t *)&block->nonce);
-						}
-					}
-				} else {
-					deb("DNE: add to getdata payload");
-					getdata->items[k++] = CBNewInventoryItem(item->type, item->hash);
-				}
-			} else if (item->type == CB_INVENTORY_ITEM_TRANSACTION) {
-				deb("[tx]");
-			} else if (item->type == CB_INVENTORY_ITEM_ERROR) {
-				deb("[err]");
-			}
-			deb("\n");
-		}
-		
-		CBFreeInventoryBroadcast(inv);
-		
-		getdata->itemNum = k;
-		getdata->items = realloc(getdata->items, getdata->itemNum * sizeof(CBInventoryItem));
-		if (getdata->items == NULL)
-			sysfail("realloc() failed");
-		
-		CBMessage *message = CBGetMessage(getdata);
-		uint32_t len = CBInventoryBroadcastCalculateLength(getdata);
-		message->bytes = CBNewByteArrayOfSize(len);
-		len = CBInventoryBroadcastSerialise(getdata, false);
-
-		uint8_t *header;
-		if (message->bytes) {
-			make_header(&header, message, "getdata\0\0\0\0\0");
-			deb("Message length: %d\n", message->bytes->length);
-			deb("Checksum: %x\n", *((uint32_t *) message->checksum));
-			deb_hex_ba(message->bytes);
-
-			int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
-			if (rv == message->bytes->length + 24) {
-				deb("send succeeds\n");
-			}
-		}
-
-		free(header);
-		CBFreeInventoryBroadcast(getdata);
+		send_getdata(peer, inv);
 	}
 	
 	// block
