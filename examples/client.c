@@ -586,6 +586,35 @@ void send_inv(CBPeer *peer, CBGetBlocks *gb){
 	CBFreeGetBlocks(gb);
 }
 
+void send_block(CBPeer *peer, CBInventoryBroadcast *gd){
+	prt(">> Sending blocks to: "); prt_ip(peer->versionMessage->addSource->ip); prt("\n");
+	int sd = peer->socketID;
+
+	deb("getdata count: %d\n", gd->itemNum);
+	uint16_t i, gd_count = gd->itemNum;
+	uint8_t *hash;
+	CBInventoryItem *item;
+	for (i = 0; i < gd_count; i++) {
+		deb("Item %4d ", i);
+		item = gd->items[i];
+		if (item->type == CB_INVENTORY_ITEM_BLOCK) {
+			hash = item->hash->sharedData->data + item->hash->offset;
+			deb("[block "); deb_hex(hash, 4); deb("]: ");
+			if (CBBlockChainStorageBlockExists(validator, hash)) {
+				deb("exists");
+				// TODO send the block!
+			}
+		} else if (item->type == CB_INVENTORY_ITEM_TRANSACTION) {
+			deb("[tx]");
+		} else if (item->type == CB_INVENTORY_ITEM_ERROR) {
+			deb("[err]");
+		}
+		deb("\n");
+	}
+
+	CBFreeInventoryBroadcast(gd);
+}
+
 ssize_t recv_buffer(int sd, uint8_t **buffer, uint32_t length){
 	if (length == 0)
 		return 0;
@@ -748,6 +777,13 @@ bool parse_message(int sd, CBPeer *peer){
 		send_getdata(peer, inv);
 	}
 	
+	// getdata
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "getdata\0\0\0\0\0", 12)) {
+		CBInventoryBroadcast *getdata = CBNewInventoryBroadcastFromData(bytes);
+		CBInventoryBroadcastDeserialise(getdata);
+		send_block(peer, getdata);
+	}
+
 	// block
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12)) {
 		CBBlock *block = CBNewBlockFromData(bytes);
