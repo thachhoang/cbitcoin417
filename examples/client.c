@@ -860,6 +860,7 @@ int main(int argc, char *argv[]){
 					case STAT:
 						prt("Peers: %d\n", peers->root->numElements);
 						prt("Last validated (main): %d\n", validator->branches[validator->mainBranch].lastValidation);
+						prt("Orphans: %d\n", validator->numOrphans);
 						prt("\n");
 						break;
 					case QUIT:

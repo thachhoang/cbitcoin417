@@ -571,6 +571,7 @@ CBBlockStatus CBFullValidatorProcessBlock(CBFullValidator * self, CBBlock * bloc
 	// Now go through any orphans
 	bool first = true;
 	for (uint8_t x = 0; x < self->numOrphans;){
+		CBBlockDeserialise(self->orphans[x], true);
 		if (NOT memcmp(CBBlockGetHash(block), CBByteArrayGetData(self->orphans[x]->prevBlockHash), 32)) {
 			if (first)
 				// Do not release the block passed to this function
