@@ -71,6 +71,7 @@ bool CBFileAppend(uint64_t file, uint8_t * data, uint32_t dataLen){
 }
 void CBFileClose(uint64_t file){
 	fclose(((CBFile *)file)->rdwr);
+	free((CBFile *)file);
 }
 bool CBFileGetLength(uint64_t file, uint32_t * length){
 	*length = ((CBFile *)file)->dataLength;
