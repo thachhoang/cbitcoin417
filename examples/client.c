@@ -409,9 +409,8 @@ void send_getblocks(CBPeer *peer){
 	prt("\n");
 	int sd = peer->socketID;
 
-	CBBlock *genesis = CBBlockChainStorageLoadBlock(validator, validator->branches[validator->mainBranch].lastValidation, validator->mainBranch);
-
-	uint8_t *rawhash = CBBlockGetHash(genesis);
+	CBBlock *last_block = CBBlockChainStorageLoadBlock(validator, validator->branches[validator->mainBranch].lastValidation, validator->mainBranch);
+	uint8_t *rawhash = CBBlockGetHash(last_block);
 	CBChainDescriptor *chain = CBNewChainDescriptor();
 	CBByteArray *stophash = CBNewByteArrayWithDataCopy(rawhash, 32);
 	if (!CBChainDescriptorAddHash(chain, stophash))
@@ -438,7 +437,7 @@ void send_getblocks(CBPeer *peer){
 	}
 
 	free(header);
-	CBFreeBlock(genesis);
+	CBFreeBlock(last_block);
 	CBReleaseObject(chain);
 	CBReleaseObject(stophash);
 	CBFreeGetBlocks(getblocks);
@@ -659,7 +658,27 @@ bool parse_message(int sd, CBPeer *peer){
 	
 	// block
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12)) {
-		
+		CBBlock *block = CBNewBlockFromData(bytes);
+		CBBlockDeserialise(block, true);
+
+		CBBlockStatus status = CBFullValidatorProcessBlock(validator, block, time(NULL));
+		deb("Block status: ");
+		switch (status) {
+			case CB_BLOCK_STATUS_MAIN: deb("main"); break;
+			case CB_BLOCK_STATUS_SIDE: deb("side"); break;
+			case CB_BLOCK_STATUS_ORPHAN: deb("orphan"); break;
+			case CB_BLOCK_STATUS_BAD: deb("bad"); break;
+			case CB_BLOCK_STATUS_BAD_TIME: deb("bad time"); break;
+			case CB_BLOCK_STATUS_DUPLICATE: deb("dupe"); break;
+			case CB_BLOCK_STATUS_ERROR: deb("error"); break;
+			case CB_BLOCK_STATUS_CONTINUE: deb("continue"); break;
+			case CB_BLOCK_STATUS_NO_NEW: deb("no new"); break;
+			default: break;
+		}
+		deb("\n");
+		deb("Last validated (main): %d\n", validator->branches[validator->mainBranch].lastValidation);
+
+		CBFreeBlock(block);
 	}
 	
 	// addr
@@ -839,7 +858,9 @@ int main(int argc, char *argv[]){
 						else prt("Initial peer is not available.\n\n");
 						break;
 					case STAT:
-						prt("Peers: %d\n\n", peers->root->numElements);
+						prt("Peers: %d\n", peers->root->numElements);
+						prt("Last validated (main): %d\n", validator->branches[validator->mainBranch].lastValidation);
+						prt("\n");
 						break;
 					case QUIT:
 						prt("Quitting...\n");
