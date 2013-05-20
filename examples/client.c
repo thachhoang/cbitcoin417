@@ -519,6 +519,8 @@ bool parse_message(int sd, CBPeer *peer){
 	uint8_t *payload;
 	ssize_t length = recv_message(sd, &header_p, &payload);
 
+	if (length <= 0)
+		deb("length: %d\n%s", length, end);
 	if (length == -1)
 		return !new_peer; // if new peer, close socket
 	if (length == 0)
@@ -533,10 +535,16 @@ bool parse_message(int sd, CBPeer *peer){
 	}
 
 	char *header = (char *) header_p;
+	deb("received %s header\n", header+CB_MESSAGE_HEADER_TYPE);
+	
+	CBByteArray *bytes;
+	if (length > 24)
+		bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
+	
+	// version
+	
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "version\0\0\0\0\0", 12)) {
-		deb("received version header\n");
-		CBByteArray *versionBytes = CBNewByteArrayWithDataCopy(payload, length - 24);
-		CBVersion *version = CBNewVersionFromData(versionBytes);
+		CBVersion *version = CBNewVersionFromData(bytes);
 		CBVersionDeserialise(version);
 		prt_ip(version->addRecv->ip); prt("\n");
 		if (new_peer) {
@@ -560,54 +568,50 @@ bool parse_message(int sd, CBPeer *peer){
 				send_version(peer);
 			send_verack(peer);
 		}
-
-		CBReleaseObject(versionBytes);
 	} else if (new_peer) {
 		deb("No version message from new peer: closing %d\n%s", sd, end);
 		return false; // no version message, no peer, close connection
 	}
-
+	
+	// verack
 	if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "verack\0\0\0\0\0\0", 12)) {
-		deb("received verack header\n");
-		if (peer->versionSent)
-			peer->versionAck = true;
+		if (peer->versionSent) peer->versionAck = true;
 	}
+	
+	// ping
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "ping\0\0\0\0\0\0\0\0", 12)) {
-		deb("received ping header\n");
-		CBByteArray *bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
 		uint64_t nonce = CBByteArrayReadInt64(bytes, 0);
 		deb("Nonce: "); deb_hexn((uint8_t *) &nonce, 8);
-		CBFreeByteArray(bytes);
-
 		send_pong(peer, nonce);
 	}
+	
+	// pong
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "pong\0\0\0\0\0\0\0\0", 12)) {
-		deb("received pong header\n");
-		CBByteArray *bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
 		uint64_t nonce = CBByteArrayReadInt64(bytes, 0);
 		deb("Nonce: "); deb_hexn((uint8_t *) &nonce, 8);
-		CBFreeByteArray(bytes);
-
 		peer->connectionWorking = true;
 	}
+	
+	// inv
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "inv\0\0\0\0\0\0\0\0\0", 12)) {
-		deb("received inv header\n");
-		CBByteArray *bytes = CBNewByteArrayWithDataCopy(payload, length - 24);
 		CBInventoryBroadcast *inv = CBNewInventoryBroadcastFromData(bytes);
 		CBInventoryBroadcastDeserialise(inv);
 
 		deb("inv count: %d\n", inv->itemNum);
-		//CBInventoryBroadcast *getdata = CBNewInventoryBroadcast();
-
-		uint16_t i, item_count = inv->itemNum > 20 ? 20 : inv->itemNum;
+		CBInventoryBroadcast *getdata = CBNewInventoryBroadcast();
+		getdata->items = malloc(inv->itemNum * sizeof(CBInventoryItem));
+		if (getdata->items == NULL)
+			sysfail("malloc() failed");
+		
+		uint16_t i, k = 0, inv_count = inv->itemNum > 10 ? 10 : inv->itemNum;
 		CBInventoryItem *item;
-		for (i = 0; i < item_count; i++) {
-			deb("Item %d: ", i);
+		for (i = 0; i < inv_count; i++) {
+			deb("Item %4d ", i);
 			item = inv->items[i];
 			if (item->type == CB_INVENTORY_ITEM_BLOCK) {
-				deb("block: ");
+				deb("[block ");
 				uint8_t *hash = item->hash->sharedData->data + item->hash->offset;
-				deb_hex(hash, 32); deb(": ");
+				deb_hex(hash, 4); deb("]: ");
 				if (CBBlockChainStorageBlockExists(validator, hash)) {
 					deb("exists: ");
 					uint8_t branch;
@@ -620,41 +624,66 @@ bool parse_message(int sd, CBPeer *peer){
 						}
 					}
 				} else {
-					deb("does not exist: add to getdata payload");
+					deb("DNE: add to getdata payload");
+					getdata->items[k++] = CBNewInventoryItem(item->type, item->hash);
 				}
 			} else if (item->type == CB_INVENTORY_ITEM_TRANSACTION) {
-				deb("tx");
+				deb("[tx]");
 			} else if (item->type == CB_INVENTORY_ITEM_ERROR) {
-				deb("err");
+				deb("[err]");
 			}
 			deb("\n");
 		}
-		//Useful:
-		//bool CBBlockChainStorageBlockExists(void * validator, uint8_t * blockHash);
-		//bool CBBlockChainStorageGetBlockLocation(void * validator, uint8_t * blockHash, uint8_t * branch, uint32_t * index);
-		//uint32_t CBBlockChainStorageGetBlockTarget(void * validator, uint8_t branch, uint32_t blockIndex);
-		//void * CBBlockChainStorageLoadBlock(void * validator, uint32_t blockID, uint32_t branch);
-		//CBBlock * CBGetBlock(void * self);
 		
+		getdata->itemNum = k;
 		CBFreeInventoryBroadcast(inv);
-		CBFreeByteArray(bytes);
+		
+		CBMessage *message = CBGetMessage(getdata);
+		uint32_t len = CBInventoryBroadcastCalculateLength(getdata);
+		message->bytes = CBNewByteArrayOfSize(len);
+		len = CBInventoryBroadcastSerialise(getdata, false);
+
+		uint8_t *header;
+		if (message->bytes) {
+			make_header(&header, message, "getdata\0\0\0\0\0");
+			deb("Message length: %d\n", message->bytes->length);
+			deb("Checksum: %x\n", *((uint32_t *) message->checksum));
+			deb_hex_ba(message->bytes);
+
+			int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+			if (rv == message->bytes->length + 24) {
+				deb("send succeeds\n");
+			}
+		}
+
+		free(header);
 	}
+	
+	// block
+	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "block\0\0\0\0\0\0\0", 12)) {
+		
+	}
+	
+	// addr
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
-		deb("received addr header\n");
+		
 	}
 
 	deb("%s", end);
 
 	// Clean up
 	free(header_p);
-	if (length > 24) free(payload);
+	if (length > 24) {
+		CBReleaseObject(bytes);
+		free(payload);
+	}
 
 	return true;
 }
 
 int main(int argc, char *argv[]){
 #ifdef UMDNET
-	prt("\nCurrency: UMD Bitcoin!!!\n");
+	prt("Currency: UMD Bitcoin!!!\n");
 #endif
 	prt("CMSC417: Rudimentary bitcoin client.\n");
 	prt("Thach Hoang. 2013.\n");
@@ -869,7 +898,7 @@ int main(int argc, char *argv[]){
 
 				bool success = parse_message(fds[i].fd, peer);
 				if (!success) {
-					deb("Closing %d\n", fds[i].fd);
+					deb("Closing %d\n\n", fds[i].fd);
 					close(fds[i].fd);
 					fds[i].fd = -1;
 					compress_array = true;
