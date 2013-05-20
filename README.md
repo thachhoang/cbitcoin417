@@ -4,7 +4,7 @@ Authors: Andrew Badger, Thach Hoang
 
 Done:
 
-- Use select() in a loop to monitor everything
+- Use poll() in a loop to monitor everything
 - Peer objects are collected in CBAssociativeArray
 - At the start, actively connect to initial peers (kale.cs.umd.edu)
 - Accept incoming connections, create new sockets and save new peers in corresponding peer objects
