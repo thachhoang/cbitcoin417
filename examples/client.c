@@ -635,8 +635,12 @@ bool parse_message(int sd, CBPeer *peer){
 			deb("\n");
 		}
 		
-		getdata->itemNum = k;
 		CBFreeInventoryBroadcast(inv);
+		
+		getdata->itemNum = k;
+		getdata->items = realloc(getdata->items, getdata->itemNum * sizeof(CBInventoryItem));
+		if (getdata->items == NULL)
+			sysfail("realloc() failed");
 		
 		CBMessage *message = CBGetMessage(getdata);
 		uint32_t len = CBInventoryBroadcastCalculateLength(getdata);
@@ -657,6 +661,7 @@ bool parse_message(int sd, CBPeer *peer){
 		}
 
 		free(header);
+		CBFreeInventoryBroadcast(getdata);
 	}
 	
 	// block
