@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <string.h>
 
+#include <CBAddressBroadcast.h>
 #include <CBAssociativeArray.h>
 #include <CBBlock.h>
 #include <CBByteArray.h>
@@ -57,7 +58,7 @@ typedef enum {
 } CBMessageHeaderOffsets;
 
 typedef enum {
-	DEFAULT, PING, GETBLOCKS, STAT, QUIT, VERSION
+	DEFAULT, PING, GETADDR, GETBLOCKS, STAT, QUIT, VERSION
 } commands;
 
 // Block storage
@@ -120,6 +121,8 @@ int command(){
 	// Main interactive command dispatch
 	if (!strcmp(cmd, "help")) {
 		help();
+	} else if (!strcmp(cmd, "addr")) {
+		rv = GETADDR;
 	} else if (!strcmp(cmd, "blocks")) {
 		rv = GETBLOCKS;
 	} else if (!strcmp(cmd, "ping")) {
@@ -340,11 +343,31 @@ void send_pong(CBPeer *peer, uint64_t nonce){
 	send_pingpong(peer, nonce, false);
 }
 
+void send_getaddr(CBPeer *peer){
+	prt(">> Sending getaddr: ");
+	prt_ip(peer->versionMessage->addSource->ip); prt("\n");
+	int sd = peer->socketID;
+
+	CBByteArray *empty = CBNewByteArrayFromString("", false);
+	CBMessage *message = CBNewMessageByObject();
+	message->bytes = empty;
+
+	uint8_t *header;
+	make_header(&header, message, "getaddr\0\0\0\0\0");
+	int rv = send_message(sd, header, NULL, 24);
+	if (rv == 24) {
+		deb("send succeeds\n");
+	}
+
+	free(header);
+	CBFreeMessage(message);
+}
+
 void send_verack(CBPeer *peer){
 	if (!peer->versionSent)
 		return;
 
-	prt("Sending verack: ");
+	prt(">> Sending verack: ");
 	prt_ip(peer->versionMessage->addSource->ip);
 	prt("\n");
 	int sd = peer->socketID;
@@ -367,7 +390,7 @@ void send_verack(CBPeer *peer){
 }
 
 void send_version(CBPeer *peer){
-	deb("Sending version: socket %d\n", peer->socketID);
+	deb(">> Sending version: socket %d\n", peer->socketID);
 	int sd = peer->socketID;
 
 	CBByteArray *ip = CBNewByteArrayWithDataCopy(SELF_IP, 16);
@@ -597,6 +620,7 @@ void send_block(CBPeer *peer, CBInventoryBroadcast *gd){
 	uint32_t index;
 	CBInventoryItem *item;
 	CBBlock *block;
+	CBMessage *message;
 	for (i = 0; i < gd_count; i++) {
 		deb("Item %4d ", i);
 		item = gd->items[i];
@@ -605,8 +629,7 @@ void send_block(CBPeer *peer, CBInventoryBroadcast *gd){
 			deb("[block "); deb_hex(hash, 4); deb("]\n");
 			if (CBBlockChainStorageGetBlockLocation(validator, hash, &branch, &index)) {
 				block = CBBlockChainStorageLoadBlock(validator, index, branch);
-
-				CBMessage *message = CBGetMessage(block);
+				message = CBGetMessage(block);
 
 				uint8_t *header;
 				if (message->bytes) {
@@ -827,7 +850,33 @@ bool parse_message(int sd, CBPeer *peer){
 	
 	// addr
 	else if (!strncmp(header+CB_MESSAGE_HEADER_TYPE, "addr\0\0\0\0\0\0\0\0", 12)) {
-		
+		CBAddressBroadcast *addr = CBNewAddressBroadcastFromData(bytes, true);
+		CBAddressBroadcastDeserialise(addr);
+		deb("[addr] count: %d\n", addr->addrNum);
+
+		int i, sd, addr_count = addr->addrNum;
+		CBPeer *new_peer;
+		CBByteArray *ip;
+		CBNetworkAddress *new_addr;
+		for (i = 0; i < addr_count; i++) {
+			ip = addr->addresses[i]->ip;
+			prt_ip(ip); prt("\n");
+			/*
+			sd = connect_peer(ip->sharedData->data + ip->offset, DEFAULT_PORT);
+			if (sd > 0) {
+				new_addr = CBNewNetworkAddress(0, addr->addresses[i]->ip, DEFAULT_PORT, CB_SERVICE_FULL_BLOCKS, false);
+				new_peer = CBNewPeerByTakingNetworkAddress(new_addr);
+				new_peer->socketID = sd;
+				new_peer->connectionWorking = true;
+				//send_version(new_peer);
+
+				//if (!add_peer(peers, init_peer))
+					//prt("Could not insert new kale peer.\n");
+			}
+			*/
+		}
+
+		CBFreeAddressBroadcast(addr);
 	}
 
 	deb("%s", end);
@@ -993,6 +1042,10 @@ int main(int argc, char *argv[]){
 				// User input
 				int rv = command();
 				switch (rv) {
+					case GETADDR:
+						if (init_peer) send_getaddr(init_peer);
+						else prt("Initial peer is not available.\n\n");
+						break;
 					case GETBLOCKS:
 						if (init_peer) send_getblocks(init_peer);
 						else prt("Initial peer is not available.\n\n");
