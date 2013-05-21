@@ -103,10 +103,12 @@ uint32_t CBAddressBroadcastDeserialise(CBAddressBroadcast * self){
 		return 0;
 	}
 	CBVarInt num = CBVarIntDecode(bytes, 0);
+	/*
 	if (num.val > 30) {
 		CBLogError("Attempting to deserialise a CBAddressBroadcast with a var int over 30.");
 		return 0;
 	}
+	*/
 	self->addresses = malloc(sizeof(*self->addresses) * (size_t)num.val);
 	if (NOT self->addresses) {
 		CBLogError("Cannot allocate %i bytes of memory in CBAddressBroadcastDeserialise\n", sizeof(*self->addresses) * (size_t)num.val);
