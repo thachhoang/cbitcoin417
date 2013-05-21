@@ -593,23 +593,39 @@ void send_block(CBPeer *peer, CBInventoryBroadcast *gd){
 	deb("getdata count: %d\n", gd->itemNum);
 	uint16_t i, gd_count = gd->itemNum;
 	uint8_t *hash;
+	uint8_t branch;
+	uint32_t index;
 	CBInventoryItem *item;
+	CBBlock *block;
 	for (i = 0; i < gd_count; i++) {
 		deb("Item %4d ", i);
 		item = gd->items[i];
 		if (item->type == CB_INVENTORY_ITEM_BLOCK) {
 			hash = item->hash->sharedData->data + item->hash->offset;
-			deb("[block "); deb_hex(hash, 4); deb("]: ");
-			if (CBBlockChainStorageBlockExists(validator, hash)) {
-				deb("exists");
-				// TODO send the block!
+			deb("[block "); deb_hex(hash, 4); deb("]\n");
+			if (CBBlockChainStorageGetBlockLocation(validator, hash, &branch, &index)) {
+				block = CBBlockChainStorageLoadBlock(validator, index, branch);
+
+				CBMessage *message = CBGetMessage(block);
+
+				uint8_t *header;
+				if (message->bytes) {
+					make_header(&header, message, "block\0\0\0\0\0\0\0");
+					deb("Message length: %d\n", message->bytes->length);
+					int rv = send_message(sd, header, message->bytes->sharedData->data+message->bytes->offset, message->bytes->length + 24);
+					if (rv == message->bytes->length + 24) {
+						deb("send succeeds\n");
+					}
+				}
+
+				free(header);
+				CBFreeBlock(block);
 			}
 		} else if (item->type == CB_INVENTORY_ITEM_TRANSACTION) {
-			deb("[tx]");
+			deb("[tx]\n");
 		} else if (item->type == CB_INVENTORY_ITEM_ERROR) {
-			deb("[err]");
+			deb("[err]\n");
 		}
-		deb("\n");
 	}
 
 	CBFreeInventoryBroadcast(gd);
